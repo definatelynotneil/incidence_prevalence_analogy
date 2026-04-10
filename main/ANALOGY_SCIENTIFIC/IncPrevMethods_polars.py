@@ -1,6 +1,7 @@
 from typing import Optional, Union
 from datetime import date, datetime
-from typing import List, Dict, Callable
+from typing import List, Dict, Callable, Iterator
+from collections import defaultdict
 import numpy as np
 from scipy.stats import chi2
 from scipy.special import ndtri
@@ -189,32 +190,255 @@ class IncPrev():
             return upper_ci
 
 
+    def _flat_demo_cols(self) -> List[str]:
+        """Return the unique individual column names referenced in DEMOGRAPHY."""
+        return list(set(
+            item
+            for entry in self.DEMOGRAPHY
+            for item in (entry if isinstance(entry, list) else [entry])
+        ))
+
+    def _iter_chunks(self, cols: List[str], chunk_size: int) -> Iterator[pl.DataFrame]:
+        """Yield Polars DataFrames of ``chunk_size`` rows from FILENAME via PyArrow.
+
+        Date columns are parsed and demographic nulls are filled on each chunk so
+        that the rule expressions can be applied directly.
+        """
+        import pyarrow.parquet as pq
+
+        date_cols = [
+            self.DataKeys["INDEX_DATE_COL"],
+            self.DataKeys["END_DATE_COL"],
+        ]
+        bd_in_file = [c for c in self.BASELINE_DATE_LIST if c in cols]
+        date_cols = date_cols + bd_in_file
+
+        catg_cols = self._flat_demo_cols()
+
+        pf = pq.ParquetFile(self.FILENAME)
+        for batch in pf.iter_batches(columns=cols, batch_size=chunk_size):
+            chunk = pl.from_arrow(batch)
+            # Ensure date columns are strings before strptime
+            chunk = chunk.with_columns(
+                pl.col([c for c in date_cols if c in chunk.columns]).cast(pl.Utf8)
+            )
+            chunk = chunk.with_columns(
+                pl.col([c for c in date_cols if c in chunk.columns])
+                .str.strptime(pl.Date, format=self.date_fmt)
+            )
+            existing_catgs = [c for c in catg_cols if c in chunk.columns]
+            if existing_catgs:
+                chunk = chunk.with_columns(pl.col(existing_catgs).fill_null("null"))
+            yield chunk
+
+    def _apply_and_sum(
+        self,
+        chunk: pl.DataFrame,
+        exprs: List[pl.Expr],
+        dates: List[str],
+    ) -> pl.DataFrame:
+        """Apply metric expressions to a chunk and sum each date column."""
+        return chunk.select(exprs).sum().select(
+            [pl.col(d) for d in dates if d in chunk.select(exprs).columns]
+        )
+
+    def _build_rate_df(
+        self,
+        acc: dict,
+        is_incidence: bool,
+    ) -> pl.DataFrame:
+        """Convert a flat accumulator dict to a rated DataFrame with CIs."""
+        col_name = "Incidence" if is_incidence else "Prevalence"
+        rows = [
+            {
+                "Condition": cond,
+                "Group": group,
+                "Subgroup": subgroup,
+                "Date": date_str,
+                "Numerator": vals[0],
+                "Denominator": vals[1],
+            }
+            for (cond, group, subgroup, date_str), vals in acc.items()
+        ]
+        if not rows:
+            return pl.DataFrame(schema={
+                "Condition": pl.Utf8, "Group": pl.Utf8, "Subgroup": pl.Utf8,
+                "Date": pl.Utf8, "Numerator": pl.Float64, "Denominator": pl.Float64,
+                col_name: pl.Float64, "Lower_CI": pl.Float64, "Upper_CI": pl.Float64,
+            })
+
+        df = pl.DataFrame(rows)
+        df = df.with_columns(
+            ((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY).alias(col_name),
+            pl.struct(["Numerator", "Denominator"])
+            .map_elements(
+                lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                return_dtype=pl.Float64,
+            )
+            .alias("Lower_CI"),
+            pl.struct(["Numerator", "Denominator"])
+            .map_elements(
+                lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                return_dtype=pl.Float64,
+            )
+            .alias("Upper_CI"),
+        )
+        return df
+
+    def calculate_overall_inc_prev_streaming(
+        self,
+        is_incidence: bool,
+        chunk_size: int,
+    ) -> pl.DataFrame:
+        """Streaming version of calculate_overall_inc_prev.
+
+        Iterates the source file in row chunks of ``chunk_size``, accumulating
+        numerator counts and denominator sums without loading the full file.
+        """
+        drange = list(self.date_range(
+            self.STUDY_START_DATE, self.STUDY_END_DATE,
+            self.increment_years, self.increment_months, self.increment_days,
+        ))
+        dates = [str(d.date()) for d in (drange[:-1] if is_incidence else drange)]
+
+        core_cols = [self.DataKeys["INDEX_DATE_COL"], self.DataKeys["END_DATE_COL"]]
+        cols = core_cols + list(self.BASELINE_DATE_LIST)
+
+        # acc[(bd_col, "Overall", "", date)] = [numerator, denominator]
+        acc: dict = defaultdict(lambda: [0, 0.0])
+
+        for chunk in self._iter_chunks(cols, chunk_size):
+            for bd_col in self.BASELINE_DATE_LIST:
+                chunk_bd = chunk.with_columns(
+                    pl.col(bd_col).alias(self.DataKeys["EVENT_DATE_COL"])
+                )
+                if is_incidence:
+                    num_exprs = self.incidence_numerator_rule(drange)
+                    den_exprs = self.incidence_denominator_rule(drange)
+                else:
+                    num_exprs = self.prevalence_numerator_rule(drange)
+                    den_exprs = self.prevalence_denominator_rule(drange)
+
+                num_row = chunk_bd.select(num_exprs).sum()
+                den_row = chunk_bd.select(den_exprs).sum()
+
+                for d in dates:
+                    if d in num_row.columns:
+                        acc[(bd_col, "Overall", "", d)][0] += num_row[d][0]
+                        acc[(bd_col, "Overall", "", d)][1] += den_row[d][0]
+
+        return self._build_rate_df(acc, is_incidence)
+
+    def calculate_grouped_inc_prev_streaming(
+        self,
+        is_incidence: bool,
+        chunk_size: int,
+    ) -> pl.DataFrame:
+        """Streaming version of calculate_grouped_inc_prev.
+
+        Subgroup totals are accumulated per chunk via group_by so that the full
+        cartesian product of subgroups × dates is never held in memory at once.
+        """
+        drange = list(self.date_range(
+            self.STUDY_START_DATE, self.STUDY_END_DATE,
+            self.increment_years, self.increment_months, self.increment_days,
+        ))
+        dates = [str(d.date()) for d in (drange[:-1] if is_incidence else drange)]
+
+        catg_cols = self._flat_demo_cols()
+        core_cols = [self.DataKeys["INDEX_DATE_COL"], self.DataKeys["END_DATE_COL"]]
+        cols = core_cols + list(self.BASELINE_DATE_LIST) + catg_cols
+
+        # acc[(bd_col, group_name, subgroup_value, date)] = [numerator, denominator]
+        acc: dict = defaultdict(lambda: [0, 0.0])
+
+        for chunk in self._iter_chunks(cols, chunk_size):
+            for bd_col in self.BASELINE_DATE_LIST:
+                for demo in self.DEMOGRAPHY:
+                    if isinstance(demo, list):
+                        demo_name = ", ".join(demo)
+                        chunk_demo = chunk.with_columns(
+                            pl.concat_str(pl.col(demo), separator=", ").alias(demo_name)
+                        )
+                        demo_col = demo_name
+                    else:
+                        chunk_demo = chunk
+                        demo_col = demo
+
+                    chunk_bd = chunk_demo.with_columns(
+                        pl.col(bd_col).alias(self.DataKeys["EVENT_DATE_COL"])
+                    )
+
+                    if is_incidence:
+                        num_exprs = self.incidence_numerator_rule(drange)
+                        den_exprs = self.incidence_denominator_rule(drange)
+                    else:
+                        num_exprs = self.prevalence_numerator_rule(drange)
+                        den_exprs = self.prevalence_denominator_rule(drange)
+
+                    # Compute per-subgroup sums for this chunk
+                    num_agg = (
+                        chunk_bd.with_columns(num_exprs)
+                        .group_by(demo_col)
+                        .agg([pl.col(d).sum() for d in dates if d in
+                              chunk_bd.with_columns(num_exprs).columns])
+                    )
+                    den_agg = (
+                        chunk_bd.with_columns(den_exprs)
+                        .group_by(demo_col)
+                        .agg([pl.col(d).sum() for d in dates if d in
+                              chunk_bd.with_columns(den_exprs).columns])
+                    )
+
+                    for row in num_agg.iter_rows(named=True):
+                        sg = row[demo_col]
+                        for d in dates:
+                            if d in row:
+                                acc[(bd_col, demo_col, sg, d)][0] += row[d]
+
+                    for row in den_agg.iter_rows(named=True):
+                        sg = row[demo_col]
+                        for d in dates:
+                            if d in row:
+                                acc[(bd_col, demo_col, sg, d)][1] += row[d]
+
+        return self._build_rate_df(acc, is_incidence)
+
     def runAnalysis(self,
                     inc: bool = True,
-                    prev: bool = True,) -> tuple[pl.DataFrame, pl.DataFrame]:
-        if inc:
-            results_inc = self.calculate_overall_inc_prev(is_incidence=True)
+                    prev: bool = True,
+                    streaming_chunk_size: Optional[int] = None,
+                    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        streaming = streaming_chunk_size is not None
+
+        if streaming:
+            results_inc = self.calculate_overall_inc_prev_streaming(True, streaming_chunk_size) if inc else None
+            results_prev = self.calculate_overall_inc_prev_streaming(False, streaming_chunk_size) if prev else None
+            if len(self.DEMOGRAPHY) > 0:
+                if inc:
+                    results_inc = pl.concat(
+                        [results_inc, self.calculate_grouped_inc_prev_streaming(True, streaming_chunk_size)],
+                        how="vertical",
+                    )
+                if prev:
+                    results_prev = pl.concat(
+                        [results_prev, self.calculate_grouped_inc_prev_streaming(False, streaming_chunk_size)],
+                        how="vertical",
+                    )
         else:
-            results_inc = None
-        if prev:
-            results_prev = self.calculate_overall_inc_prev(is_incidence=False)
-        else:
-            results_prev = None
-        if len(self.DEMOGRAPHY) > 0:
-            if inc:
-                results_inc = pl.concat(tuple([
-                    results_inc,
-                    self.calculate_grouped_inc_prev(is_incidence=True)
-                    ]),
-                                        how="vertical",
-                                        )
-            if prev:
-                results_prev = pl.concat(tuple([
-                    results_prev,
-                    self.calculate_grouped_inc_prev(is_incidence=False)
-                    ]),
-                                        how="vertical",
-                                        )
+            results_inc = self.calculate_overall_inc_prev(is_incidence=True) if inc else None
+            results_prev = self.calculate_overall_inc_prev(is_incidence=False) if prev else None
+            if len(self.DEMOGRAPHY) > 0:
+                if inc:
+                    results_inc = pl.concat(
+                        [results_inc, self.calculate_grouped_inc_prev(is_incidence=True)],
+                        how="vertical",
+                    )
+                if prev:
+                    results_prev = pl.concat(
+                        [results_prev, self.calculate_grouped_inc_prev(is_incidence=False)],
+                        how="vertical",
+                    )
 
         return tuple([results_inc, results_prev])
 

@@ -8,8 +8,9 @@ with open("config.yml",
     config = yaml.safe_load(file_config)
 
 
+STAGES = "process | incprev | strd | zscore | censor | report"
 if len(sys.argv) == 1:
-    print("Insert argument at commandline: `process` for preprocessing; `incprev` for incprev calculations; `strd` for direct standardisation; `censor` for small number censoring; `report` for producing graphs and tables")
+    print(f"Insert argument at commandline: {STAGES}")
     opt = None
 else:
     opt = sys.argv[1]
@@ -22,6 +23,7 @@ if opt == "process":
             config["dir_data"],
             config["processing"],
             date_fmt=config["date_fmt"],
+            config_incprev=config["incprev"],
             )
 
 
@@ -56,6 +58,12 @@ if opt == "censor":
             strd = config["censor"]["strd"],
             dir_out = config["dir_out"],
             )
+
+
+## Ratio Z-scores
+if opt == "zscore":
+    from main.ratioZscore import run_ratio_zscore
+    run_ratio_zscore(config)
 
 
 ## reportResults

@@ -10,13 +10,14 @@ import yaml
 
 import polars as pl
 import pyarrow.dataset as ds
-from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes
+from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files
 
 def preprocessing(
         dir_data: str,
         config_preproc: dict,
         date_fmt: str = "%Y-%m-%d",
-        path_log: str = "log_sBatch_1Python.txt"
+        path_log: str = "log_sBatch_1Python.txt",
+        config_incprev: dict = None,
         ) -> None:
     ## Log
     logging.basicConfig(filename=path_log,
@@ -206,3 +207,41 @@ def preprocessing(
         logger.info("    Linking IMD finished")
 
     os.rename(f"{dir_data}{outFile}", f"{dir_data}dat_processed.parquet")
+
+    ###CreateBatchFiles############################################################
+    if config_incprev is not None and config_incprev.get("create_batch_files"):
+        logger.info("Creating per-batch parquet files")
+        print("Creating per-batch parquet files (column-wise batching)")
+
+        processed_path = f"{dir_data}dat_processed.parquet"
+
+        # Discover BD_ columns from file if not specified in config
+        if config_incprev.get("BD_LIST"):
+            bd_list = list(config_incprev["BD_LIST"])
+        else:
+            bd_list = [
+                c for c in pl.scan_parquet(processed_path).collect_schema().names()
+                if c.startswith("BD_")
+            ]
+
+        # Flatten DEMOGRAPHY (may contain nested lists for composite groups)
+        demo_cols = list(set(
+            item
+            for entry in config_incprev.get("DEMOGRAPHY", [])
+            for item in (entry if isinstance(entry, list) else [entry])
+        ))
+
+        core_cols = [
+            config_incprev.get("col_index_date", "INDEX_DATE"),
+            config_incprev.get("col_end_date", "END_DATE"),
+        ]
+
+        create_batch_parquet_files(
+            in_path=processed_path,
+            out_dir=dir_data,
+            bd_list=bd_list,
+            batch_size=config_incprev.get("batch_size", 10),
+            core_cols=core_cols,
+            demo_cols=demo_cols,
+        )
+        logger.info("    Creating per-batch parquet files finished")

@@ -66,6 +66,15 @@ incprev:
   # Note: Each process will load the input data into memory, so is memory intensive
   n_processes: !!int 1
 
+  # Column-wise batching: create dat_batch_N.parquet during `process` stage, each
+  # holding only the columns needed for that batch (core + demographics + batch BD_).
+  # Reduces per-batch memory from the full parquet to a small fraction.
+  create_batch_files: !!bool False
+
+  # Row-wise streaming: process the patient file in chunks of this many rows instead
+  # of loading it all at once. null disables streaming (default in-memory behaviour).
+  streaming_chunk_size: null
+
   BD_LIST: # null if want to automatically use all outcomes
     - "condition_a"
     - "condition_b"
@@ -94,6 +103,14 @@ strd:
     catg_a: "AGE_CATEGORY, SEX, pat_catg_a"
     catg_b: "AGE_CATEGORY, SEX, pat_catg_b"
     catg_both: "AGE_CATEGORY, SEX, pat_catg_a, pat_catg_b"
+
+zscore:
+  # Significance level for ratio confidence intervals (default 0.05 → 95% CI)
+  alpha: !!float 0.05
+  # Restrict z-score analysis to these Group values. null = use all groups.
+  include_groups: null
+    # - "catg_a"
+    # - "catg_b"
 
 censor:
   #crude censored by default

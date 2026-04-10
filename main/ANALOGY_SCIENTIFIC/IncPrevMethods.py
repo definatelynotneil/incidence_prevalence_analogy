@@ -112,30 +112,48 @@ class StrdIncPrev():
 
         return df
 
-    def standardise_subgroups_years(self, df:pd.DataFrame, measure):
+    def standardise_subgroups_years(self, df: pd.DataFrame, measure):
         dict_years = dict()
+        if measure == "Prevalence":
+            denom_col = "Denominator"
+        else:
+            denom_col = "PersonYears"
+
+        wi_map = self.ref_standardDenom.Count.to_dict()
 
         for i in df.Date.unique():
-            #print(i)
-            df_year = df[df.Date==i].copy()
-#            df_year = self.split_subgroup_strings(df_year)
-            df_year = df_year[df_year[self.group_col]!='Ireland'] #Ireland is not part of IMD
-#            dict_years[i] = df_year.groupby([self.group_col]).apply(self.standardise_year, measure)
-            dict_years[f"{i}_Upper_CI"], dict_years[i] = self.dobsons_ci(df_year, True, measure, return_DSR=True)
+            df_year = df[df.Date == i].copy()
+            df_year = df_year[df_year[self.group_col] != "Ireland"]
+
+            dict_years[f"{i}_Upper_CI"], dict_years[i] = self.dobsons_ci(
+                df_year, True, measure, return_DSR=True
+            )
             dict_years[f"{i}_Lower_CI"] = self.dobsons_ci(df_year, False, measure)
+            dict_years[f"{i}_DSR_Var"] = df_year.groupby(self.group_col).apply(
+                self.calc_dsr_var_group, denom_col, wi_map
+            )
 
         return dict_years
 
     def standardise_overall_years(self, df, measure):
         dict_years = dict()
+        if measure == "Prevalence":
+            denom_col = "Denominator"
+        else:
+            denom_col = "PersonYears"
+
+        wi_map = self.ref_standardDenom.Count.to_dict()
+
         for i in df.Date.unique():
-            df_year = df[df.Date==i].copy()
-            #Not sure why std_group col has surrounding (), but below is a quick fix
-            df_year["std_group"] = df_year["std_group"].apply(lambda x, rep1, rep2: x.replace(rep1, rep2), args=tuple(["(", ""]))
-            df_year["std_group"] = df_year["std_group"].apply(lambda x, rep1, rep2: x.replace(rep1, rep2), args=tuple([")", ""]))
-            #dict_years[i] = self.standardise_year(df_year, measure)
-            dict_years[f"{i}_Upper_CI"], dict_years[i] = self.dobsons_ci(df_year, True, measure, False, return_DSR=True)
+            df_year = df[df.Date == i].copy()
+            df_year["std_group"] = df_year["std_group"].apply(
+                lambda x: x.replace("(", "").replace(")", "")
+            )
+            dict_years[f"{i}_Upper_CI"], dict_years[i] = self.dobsons_ci(
+                df_year, True, measure, False, return_DSR=True
+            )
             dict_years[f"{i}_Lower_CI"] = self.dobsons_ci(df_year, False, measure, False)
+            dict_years[f"{i}_DSR_Var"] = self.calc_dsr_var_group(df_year, denom_col, wi_map)
 
         return dict_years
 
@@ -176,18 +194,22 @@ class StrdIncPrev():
 
         def reformat(dat, measure):
             dat = dat.melt(ignore_index=False)
-            cols = [re.sub(".*[:0-9:].(.*)","\\1",x) for x in list(dat.variable)]
+            cols = [re.sub(r".*[:0-9:].(.*)", "\\1", x) for x in list(dat.variable)]
             if measure == "Prevalence":
-                cols = ["Prevalence" if x=="" else x for x in cols]
+                cols = ["Prevalence" if x == "" else x for x in cols]
             elif measure == "Incidence":
-                cols = ["Incidence" if x=="" else x for x in cols]
+                cols = ["Incidence" if x == "" else x for x in cols]
 
-            dates = [re.sub("(.*[:0-9:]).*","\\1",x) for x in list(dat.variable)]
+            dates = [re.sub(r"(.*[:0-9:]).*", "\\1", x) for x in list(dat.variable)]
 
             dat.variable = cols
             dat["Date"] = dates
 
-            dat = dat.pivot_table(columns="variable", values="value", index=[self.condition_col, "Date", self.category_col, self.group_col])
+            dat = dat.pivot_table(
+                columns="variable",
+                values="value",
+                index=[self.condition_col, "Date", self.category_col, self.group_col],
+            )
 
             return dat
 
@@ -196,6 +218,30 @@ class StrdIncPrev():
         df_all_rates = df_all_rates.reset_index(level=["Group", "Date"])
 
         return df_all_rates
+
+    def calc_dsr_var_group(self, df_group, denom_col, wi_map) -> float:
+        """Return the variance of the DSR (in PER_PY^2 units) for a single subgroup.
+
+        Uses the formula: Var(DSR) = (1/sum_wi^2) * sum(wi^2 * Oi / ni^2),
+        scaled by PER_PY^2 to match the units of the reported DSR.
+        """
+        df_group = df_group.copy()
+        df_group["std_group"] = df_group["std_group"].apply(
+            lambda x: x.replace("'", "")
+        )
+        wi = np.vectorize(wi_map.get)(df_group["std_group"].values)
+        if None in wi:
+            return np.NaN
+
+        ni = df_group[denom_col].values
+        Oi = df_group.Numerator.values
+        sum_wi = sum(wi)
+
+        if (ni == 0).any():
+            return np.NaN
+
+        var_raw = (1 / (sum_wi ** 2)) * sum((wi ** 2) * Oi / (ni ** 2))
+        return var_raw * (self.PER_PY ** 2)
 
     def calc_ci_group(self, df_group, denom_col, wi_map, upper, return_DSR=False,):
         """

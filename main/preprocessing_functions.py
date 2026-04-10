@@ -52,8 +52,8 @@ def rmDup(
     """
     if A_raw.endswith(".csv"):
         #Get names for naming of output csv
-        A_name = sub("^.*/(.*)\.csv$", r"\1", A_raw)
-        B_name = sub("^.*/(.*)\.csv$", r"\1", B_raw)
+        A_name = sub(r"^.*/(.*)\.csv$", r"\1", A_raw)
+        B_name = sub(r"^.*/(.*)\.csv$", r"\1", B_raw)
         #Read in data
             #infer_schema_length=0 reads all cols as utf8 (str)
             #preventing type errors when concat
@@ -62,8 +62,8 @@ def rmDup(
 
     elif A_raw.endswith(".parquet"):
         #Get names for naming of output csv
-        A_name = sub("^.*/(.*)\.parquet$", r"\1", A_raw)
-        B_name = sub("^.*/(.*)\.parquet$", r"\1", B_raw)
+        A_name = sub(r"^.*/(.*)\.parquet$", r"\1", A_raw)
+        B_name = sub(r"^.*/(.*)\.parquet$", r"\1", B_raw)
         #Read in data
             #infer_schema_length=0 reads all cols as utf8 (str)
             #preventing type errors when concat
@@ -510,3 +510,50 @@ def link_hes(path_dat: str,
         query.sink_parquet(path_out)
     else:
         query.collect().write_parquet(path_out)
+
+
+def create_batch_parquet_files(
+    in_path: str,
+    out_dir: str,
+    bd_list: list,
+    batch_size: int,
+    core_cols: list,
+    demo_cols: list,
+) -> None:
+    """Write one parquet file per condition-batch, containing only the columns required
+    for that batch's incidence/prevalence calculation.
+
+    Each output file (``dat_batch_0.parquet``, ``dat_batch_1.parquet``, …) contains:
+    * the core cohort columns (INDEX_DATE, END_DATE, etc.)
+    * all demographic stratification columns
+    * only the BD_ condition columns belonging to that batch
+
+    This reduces per-batch memory from the full processed parquet size (potentially
+    hundreds of GB) to a small fraction of it.
+
+    Parameters
+    ----------
+    in_path:    Absolute path to dat_processed.parquet.
+    out_dir:    Directory to write batch files into (same as dir_data, typically).
+    bd_list:    Ordered list of BD_ condition columns to split across batches.
+    batch_size: Number of BD_ columns per batch.
+    core_cols:  Always-included columns (e.g. INDEX_DATE, END_DATE).
+    demo_cols:  Demographic columns (flattened from DEMOGRAPHY config).
+    """
+    import polars as pl
+
+    available = set(pl.scan_parquet(in_path).collect_schema().names())
+
+    batches = [bd_list[i : i + batch_size] for i in range(0, len(bd_list), batch_size)]
+
+    for batch_id, batch_bd_cols in enumerate(batches):
+        wanted = core_cols + demo_cols + list(batch_bd_cols)
+        keep = [c for c in wanted if c in available]
+
+        out_path = f"{out_dir}dat_batch_{batch_id}.parquet"
+        (
+            pl.scan_parquet(in_path, low_memory=True)
+            .select(keep)
+            .sink_parquet(out_path)
+        )
+        print(f"  Batch {batch_id}: wrote {len(keep)} columns → {out_path}")
