@@ -36,6 +36,28 @@ processing:
   link_imd: !!bool False
   imd_map_file: !!str ".csv"
 
+  # Derived columns: optional extra columns computed from existing data during
+  # preprocessing. Each entry is only applied when `enabled: true`.
+  derived_columns:
+    imd_quintile:
+      enabled: !!bool False
+      source_col: !!str "IMD_DECILE"   # numeric decile column (1–10) in the data
+      output_col: !!str "IMD_QUINTILE"
+      quintile_labels:
+        - "Q1 (most deprived)"
+        - "Q2"
+        - "Q3"
+        - "Q4"
+        - "Q5 (least deprived)"
+    age_binary:
+      enabled: !!bool False
+      source_col: !!str "AGE"           # numeric age-in-years column in the data
+      output_col: !!str "AGE_BINARY"
+      threshold: !!int 18
+      labels:
+        - "Under 18"
+        - "18 and over"
+
 incprev:
   filename: !!str "dat_processed.parquet"
 

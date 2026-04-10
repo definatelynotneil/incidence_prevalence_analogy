@@ -1,0 +1,185 @@
+# config_adhd_autism.yml
+# ========================
+# Condition-specific configuration for ADHD and Autism.
+#
+# Key differences from config.yml:
+#   - BD_LIST restricted to ADHD and Autism only
+#   - IMD stratified by quintile (not decile)
+#   - Additional AGE_BINARY (under 18 / 18 and over) group, with cross-tabs
+#     against IMD, ethnicity, sex — crude output only (not standardised)
+#   - Outputs written to out/adhd_autism/ (separate from main run)
+#
+# Usage:
+#   python run.py process  --config config_adhd_autism.yml   # run once; adds derived columns to dat_processed.parquet
+#   python run.py incprev  --config config_adhd_autism.yml
+#   python run.py strd     --config config_adhd_autism.yml
+#   python run.py zscore   --config config_adhd_autism.yml
+#   python run.py censor   --config config_adhd_autism.yml
+#   python run.py report   --config config_adhd_autism.yml
+#
+# NOTE on `process`:
+#   The process stage writes a single shared dat_processed.parquet in dir_data.
+#   If derived columns (IMD_QUINTILE, AGE_BINARY) are also needed for other
+#   condition groups, enable them in those configs too — or run process once with
+#   all derived columns enabled before running incprev for any group.
+
+dir_data: !!str "data/"
+dir_out:  !!str "out/adhd_autism/"   # separate output directory
+
+date_fmt: !!str "%d-%m-%Y"
+
+processing:
+  filename: !!str "data_test.csv"   # ← raw input file (same as main config)
+
+  filename_gold: !!str ".csv"
+  filename_aurum: !!str ".csv"
+  map_file_AtoB: !!str "VisionToEmisMigrators.txt"
+  map_delim_AtoB: !!str "\t"
+
+  path_hes: null
+  col_patid_cprd: "PATIENT_ID"
+  col_patid_hes: "patid"
+
+  mergeCols_AtoB: null
+  rm_old_cols: True
+
+  combineLevels: null
+
+  link_imd: !!bool False
+  imd_map_file: !!str ".csv"
+
+  derived_columns:
+    imd_quintile:
+      enabled: !!bool True
+      source_col: !!str "IMD_DECILE"   # ← confirm this matches your IMD column name
+      output_col: !!str "IMD_QUINTILE"
+      quintile_labels:
+        - "Q1 (most deprived)"
+        - "Q2"
+        - "Q3"
+        - "Q4"
+        - "Q5 (least deprived)"
+    age_binary:
+      enabled: !!bool True
+      source_col: !!str "AGE"           # ← confirm this matches your numeric age column name
+      output_col: !!str "AGE_BINARY"
+      threshold: !!int 18
+      labels:
+        - "Under 18"
+        - "18 and over"
+
+incprev:
+  filename: !!str "dat_processed.parquet"
+
+  col_end_date:   !!str "END_DATE"
+  col_index_date: !!str "INDEX_DATE"
+
+  start_date:
+    inc:
+      year:  !!int 2001
+      month: !!int 1
+      day:   !!int 1
+    prev:
+      year:  !!int 2001
+      month: !!int 7
+      day:   !!int 1
+  end_date:
+    inc:
+      year:  !!int 2003
+      month: !!int 12
+      day:   !!int 31
+    prev:
+      year:  !!int 2003
+      month: !!int 12
+      day:   !!int 31
+
+  n_processes: !!int 1
+  create_batch_files: !!bool False
+  streaming_chunk_size: null
+
+  BD_LIST:
+    - "BD_ADHD"     # ← replace with your exact BD_ column name for ADHD
+    - "BD_AUTISM"   # ← replace with your exact BD_ column name for Autism
+
+  batch_size: !!int 1
+  INCREMENT_BY_MONTH: !!int 12
+  calc_grouped: !!bool True
+
+  DEMOGRAPHY:
+    # --- Standalone stratifiers ---
+    - "AGE_CATEGORY"    # standard age groups (also used as standardisation axis)
+    - "SEX"
+    - "IMD_QUINTILE"    # replaces IMD_DECILE for this condition group
+    - "ETHNICITY"       # ← replace with your ethnicity column name; remove if not available
+
+    # --- AGE_BINARY: crude output only ---
+    # Not listed in strd.standard_breakdowns, so these never enter the
+    # standardisation stage. Cross-tabs below give age-group × other-variable
+    # stratification in the crude results.
+    - "AGE_BINARY"
+    - ["AGE_BINARY", "SEX"]
+    - ["AGE_BINARY", "IMD_QUINTILE"]
+    - ["AGE_BINARY", "ETHNICITY"]   # ← remove if ETHNICITY column not available
+
+    # --- Composite groups required for standardisation ---
+    # These must match the values in strd.standard_breakdowns exactly.
+    - ["AGE_CATEGORY", "SEX"]                     # → Overall DSR
+    - ["AGE_CATEGORY", "SEX", "IMD_QUINTILE"]     # → DSR per IMD quintile
+    - ["AGE_CATEGORY", "SEX", "ETHNICITY"]        # → DSR per ethnicity; remove if not available
+
+strd:
+  reference_population: "UK Age-Sex Pop Structure.csv"
+  age_bins:        [0, 16, 30, 40, 50, 60, 70, 80, 115]
+  age_group_labels: ['0-16', '17-30', '31-40', '41-50', '51-60', '61-70', '71-80', '81+']
+
+  standard_breakdowns:  # must include 'Overall'; label keys are arbitrary
+    Overall:       "AGE_CATEGORY, SEX"
+    imd_quintile:  "AGE_CATEGORY, SEX, IMD_QUINTILE"
+    ethnicity:     "AGE_CATEGORY, SEX, ETHNICITY"   # ← remove if ETHNICITY not available
+    # AGE_BINARY groups are deliberately absent here → crude only
+
+zscore:
+  alpha: !!float 0.05
+  # Restrict z-score output to the standardised groups only.
+  # AGE_BINARY groups are excluded (crude only, no DSR variance available).
+  include_groups:
+    - "imd_quintile"
+    - "ethnicity"   # ← remove if ETHNICITY not available
+
+censor:
+  n: 10
+  strd: True
+
+report:
+  table1: True
+  table1_catgs:
+    - "AGE_CATEGORY"
+    - "SEX"
+    - "IMD_QUINTILE"
+    - "ETHNICITY"     # ← remove if not available
+    - "AGE_BINARY"
+  table1_nums: []
+
+  crude: True
+  catgs_crude:
+    - "Overall"
+    - "AGE_CATEGORY"
+    - "SEX"
+    - "IMD_QUINTILE"
+    - "ETHNICITY"     # ← remove if not available
+    - "AGE_BINARY"
+
+  strd: True
+  catgs_strd:
+    - "Overall"
+    - "imd_quintile"
+    - "ethnicity"     # ← remove if not available
+
+  layout:
+    ticklabelstep: 1
+    marker_opacity: 1.0
+    marker_size: 15
+    line_opacity: 0.8
+    line_width: 3.5
+    error_y_thickness: 2.0
+    error_y_width: 2.5

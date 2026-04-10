@@ -10,7 +10,7 @@ import yaml
 
 import polars as pl
 import pyarrow.dataset as ds
-from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files
+from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
 
 def preprocessing(
         dir_data: str,
@@ -207,6 +207,25 @@ def preprocessing(
         logger.info("    Linking IMD finished")
 
     os.rename(f"{dir_data}{outFile}", f"{dir_data}dat_processed.parquet")
+
+    ###DerivedColumns##############################################################
+    derived_cfg = config_preproc.get("derived_columns") or {}
+    any_enabled = any(
+        isinstance(v, dict) and v.get("enabled")
+        for v in derived_cfg.values()
+    )
+    if any_enabled:
+        logger.info("Deriving extra columns (IMD quintile / age binary)")
+        print("Deriving extra columns")
+        temp_path = f"{dir_data}dat_derived_temp.parquet"
+        derive_columns(
+            in_path=f"{dir_data}dat_processed.parquet",
+            out_path=temp_path,
+            derived_config=derived_cfg,
+        )
+        os.remove(f"{dir_data}dat_processed.parquet")
+        os.rename(temp_path, f"{dir_data}dat_processed.parquet")
+        logger.info("    Deriving extra columns finished")
 
     ###CreateBatchFiles############################################################
     if config_incprev is not None and config_incprev.get("create_batch_files"):

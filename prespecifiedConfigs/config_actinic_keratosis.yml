@@ -1,0 +1,181 @@
+# config_actinic_keratosis.yml
+# ==============================
+# Condition-specific configuration for Actinic Keratosis.
+#
+# Key differences from config.yml:
+#   - BD_LIST restricted to Actinic Keratosis only
+#   - Additional (IMD_DECILE, REGION) intersection group in crude output
+#   - Outputs written to out/actinic_keratosis/ (separate from main run)
+#
+# Note on (IMD_DECILE, REGION) standardisation:
+#   This intersection is included in DEMOGRAPHY for crude output but is NOT
+#   listed in strd.standard_breakdowns. Standardising within each IMD × Region
+#   cell requires sufficient patient numbers in every age-sex stratum per cell,
+#   which is unlikely across 10 deciles × many regions. Add it to
+#   standard_breakdowns only if cell sizes allow.
+#
+# Usage:
+#   python run.py process  --config "Pre-specified configs/config_actinic_keratosis.yml"
+#   python run.py incprev  --config "Pre-specified configs/config_actinic_keratosis.yml"
+#   python run.py strd     --config "Pre-specified configs/config_actinic_keratosis.yml"
+#   python run.py zscore   --config "Pre-specified configs/config_actinic_keratosis.yml"
+#   python run.py censor   --config "Pre-specified configs/config_actinic_keratosis.yml"
+#   python run.py report   --config "Pre-specified configs/config_actinic_keratosis.yml"
+#
+# NOTE on `process`:
+#   The process stage writes a single shared dat_processed.parquet in dir_data.
+#   No derived columns are needed for this condition group, so process only
+#   needs re-running if the raw data has changed.
+
+dir_data: !!str "data/"
+dir_out:  !!str "out/actinic_keratosis/"   # separate output directory
+
+date_fmt: !!str "%d-%m-%Y"
+
+processing:
+  filename: !!str "data_test.csv"   # ← raw input file (same as main config)
+
+  filename_gold: !!str ".csv"
+  filename_aurum: !!str ".csv"
+  map_file_AtoB: !!str "VisionToEmisMigrators.txt"
+  map_delim_AtoB: !!str "\t"
+
+  path_hes: null
+  col_patid_cprd: "PATIENT_ID"
+  col_patid_hes: "patid"
+
+  mergeCols_AtoB: null
+  rm_old_cols: True
+
+  combineLevels: null
+
+  link_imd: !!bool False
+  imd_map_file: !!str ".csv"
+
+  derived_columns:
+    imd_quintile:
+      enabled: !!bool False   # not needed for this condition group
+      source_col: !!str "IMD_DECILE"
+      output_col: !!str "IMD_QUINTILE"
+      quintile_labels:
+        - "Q1 (most deprived)"
+        - "Q2"
+        - "Q3"
+        - "Q4"
+        - "Q5 (least deprived)"
+    age_binary:
+      enabled: !!bool False   # not needed for this condition group
+      source_col: !!str "AGE"
+      output_col: !!str "AGE_BINARY"
+      threshold: !!int 18
+      labels:
+        - "Under 18"
+        - "18 and over"
+
+incprev:
+  filename: !!str "dat_processed.parquet"
+
+  col_end_date:   !!str "END_DATE"
+  col_index_date: !!str "INDEX_DATE"
+
+  start_date:
+    inc:
+      year:  !!int 2001
+      month: !!int 1
+      day:   !!int 1
+    prev:
+      year:  !!int 2001
+      month: !!int 7
+      day:   !!int 1
+  end_date:
+    inc:
+      year:  !!int 2003
+      month: !!int 12
+      day:   !!int 31
+    prev:
+      year:  !!int 2003
+      month: !!int 12
+      day:   !!int 31
+
+  n_processes: !!int 1
+  create_batch_files: !!bool False
+  streaming_chunk_size: null
+
+  BD_LIST:
+    - "BD_ACTINIC_KERATOSIS"   # ← replace with your exact BD_ column name
+
+  batch_size: !!int 1
+  INCREMENT_BY_MONTH: !!int 12
+  calc_grouped: !!bool True
+
+  DEMOGRAPHY:
+    # --- Standalone stratifiers ---
+    - "AGE_CATEGORY"
+    - "SEX"
+    - "IMD_DECILE"
+    - "REGION"          # ← replace with your region column name if different
+
+    # --- (IMD_DECILE, REGION) intersection: crude only ---
+    # See note at top of file regarding standardisation of this group.
+    - ["IMD_DECILE", "REGION"]
+
+    # --- Composite groups required for standardisation ---
+    - ["AGE_CATEGORY", "SEX"]                  # → Overall DSR
+    - ["AGE_CATEGORY", "SEX", "IMD_DECILE"]    # → DSR per IMD decile
+    - ["AGE_CATEGORY", "SEX", "REGION"]        # → DSR per region
+
+strd:
+  reference_population: "UK Age-Sex Pop Structure.csv"
+  age_bins:        [0, 16, 30, 40, 50, 60, 70, 80, 115]
+  age_group_labels: ['0-16', '17-30', '31-40', '41-50', '51-60', '61-70', '71-80', '81+']
+
+  standard_breakdowns:   # must include 'Overall'; label keys are arbitrary
+    Overall:    "AGE_CATEGORY, SEX"
+    imd_decile: "AGE_CATEGORY, SEX, IMD_DECILE"
+    region:     "AGE_CATEGORY, SEX, REGION"
+    # (IMD_DECILE, REGION) intersection deliberately absent → crude only
+
+zscore:
+  alpha: !!float 0.05
+  include_groups:
+    - "imd_decile"
+    - "region"
+
+censor:
+  n: 10
+  strd: True
+
+report:
+  table1: True
+  table1_catgs:
+    - "AGE_CATEGORY"
+    - "SEX"
+    - "IMD_DECILE"
+    - "REGION"      # ← remove if not available
+  table1_nums: []
+
+  crude: True
+  catgs_crude:
+    - "Overall"
+    - "AGE_CATEGORY"
+    - "SEX"
+    - "IMD_DECILE"
+    - "REGION"
+    # The IMD_DECILE, REGION intersection will appear in the raw crude CSV
+    # but is not listed here for plotting (too many combinations for a chart).
+    # Access it directly from inc_crude.csv / prev_crude.csv if needed.
+
+  strd: True
+  catgs_strd:
+    - "Overall"
+    - "imd_decile"
+    - "region"
+
+  layout:
+    ticklabelstep: 1
+    marker_opacity: 1.0
+    marker_size: 15
+    line_opacity: 0.8
+    line_width: 3.5
+    error_y_thickness: 2.0
+    error_y_width: 2.5

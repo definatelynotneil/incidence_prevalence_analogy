@@ -512,6 +512,68 @@ def link_hes(path_dat: str,
         query.collect().write_parquet(path_out)
 
 
+def derive_columns(in_path: str, out_path: str, derived_config: dict) -> None:
+    """Add opt-in derived columns to the processed parquet file.
+
+    Currently supports two derived column types, each only applied when
+    ``enabled: true`` in the config:
+
+    * **imd_quintile** — collapses a numeric IMD decile column (1–10) into
+      quintiles (1 = most deprived).
+    * **age_binary** — splits a numeric age column into two labelled groups
+      (e.g. "Under 18" / "18 and over") at a configurable threshold.
+
+    Uses Polars lazy evaluation so the full file is never loaded into memory.
+
+    Parameters
+    ----------
+    in_path:        Path to the source parquet (dat_processed.parquet).
+    out_path:       Path for the output parquet (a temp path; caller renames).
+    derived_config: The ``processing.derived_columns`` dict from config.yml.
+    """
+    import polars as pl
+
+    lf = pl.scan_parquet(in_path, low_memory=True)
+
+    imd_cfg = derived_config.get("imd_quintile") or {}
+    if imd_cfg.get("enabled"):
+        src = imd_cfg["source_col"]
+        out = imd_cfg["output_col"]
+        labels = imd_cfg.get("quintile_labels", [
+            "Q1 (most deprived)", "Q2", "Q3", "Q4", "Q5 (least deprived)"
+        ])
+        if len(labels) != 5:
+            raise ValueError("imd_quintile.quintile_labels must have exactly 5 entries")
+        decile = pl.col(src).cast(pl.Int32, strict=False)
+        lf = lf.with_columns(
+            pl.when(decile.is_between(1, 2)).then(pl.lit(labels[0]))
+            .when(decile.is_between(3, 4)).then(pl.lit(labels[1]))
+            .when(decile.is_between(5, 6)).then(pl.lit(labels[2]))
+            .when(decile.is_between(7, 8)).then(pl.lit(labels[3]))
+            .when(decile.is_between(9, 10)).then(pl.lit(labels[4]))
+            .otherwise(None)
+            .alias(out)
+        )
+
+    age_cfg = derived_config.get("age_binary") or {}
+    if age_cfg.get("enabled"):
+        src = age_cfg["source_col"]
+        out = age_cfg["output_col"]
+        threshold = age_cfg.get("threshold", 18)
+        labels = age_cfg.get("labels", [f"Under {threshold}", f"{threshold} and over"])
+        if len(labels) != 2:
+            raise ValueError("age_binary.labels must have exactly 2 entries")
+        age = pl.col(src).cast(pl.Int32, strict=False)
+        lf = lf.with_columns(
+            pl.when(age < threshold).then(pl.lit(labels[0]))
+            .when(age >= threshold).then(pl.lit(labels[1]))
+            .otherwise(None)
+            .alias(out)
+        )
+
+    lf.sink_parquet(out_path)
+
+
 def create_batch_parquet_files(
     in_path: str,
     out_dir: str,

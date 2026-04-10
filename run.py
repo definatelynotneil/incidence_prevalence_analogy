@@ -1,19 +1,23 @@
 import sys
+import argparse
 import yaml
 import os
 
-with open("config.yml",
-          "r",
-          encoding="utf8") as file_config:
-    config = yaml.safe_load(file_config)
-
-
 STAGES = "process | incprev | strd | zscore | censor | report"
-if len(sys.argv) == 1:
+
+parser = argparse.ArgumentParser(description="Incidence/prevalence pipeline")
+parser.add_argument("stage", nargs="?", choices=STAGES.split(" | "),
+                    help=f"Pipeline stage to run: {STAGES}")
+parser.add_argument("--config", default="config.yml",
+                    help="Path to config YAML file (default: config.yml)")
+args = parser.parse_args()
+opt = args.stage
+
+if opt is None:
     print(f"Insert argument at commandline: {STAGES}")
-    opt = None
-else:
-    opt = sys.argv[1]
+
+with open(args.config, "r", encoding="utf8") as file_config:
+    config = yaml.safe_load(file_config)
 
 
 ## Preprocessing
