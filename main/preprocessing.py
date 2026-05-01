@@ -27,113 +27,7 @@ def _checkpoint(label: str, logger) -> None:
     logger.info(msg)
 
 
-def _csv_to_parquet_streaming(
-        csv_path: str,
-        out_path: str,
-        bd_filter: "set | None",
-        logger,
-        block_size_mb: int = 64,
-) -> None:
-    """Convert a wide CSV to parquet by streaming through PyArrow in chunks.
-
-    Uses PyArrow's open_csv (chunked reader) so that at most one block of rows
-    is in RAM at a time, regardless of how many columns the file has.
-
-    Empty strings are replaced with null at parse time via ConvertOptions.
-    When bd_filter is set, only BD_ columns matching the filter are read;
-    all non-BD_ columns are always included.  BD_MEDI:COND:N column names are
-    stripped to BD_MEDI:COND and duplicate post-rename names are deduplicated
-    (first occurrence wins).
-    """
-    import pyarrow as pa
-    import pyarrow.csv as pa_csv
-    import pyarrow.parquet as pq
-
-    # Read only the header line — no data loaded.
-    with open(csv_path, "r", newline="") as fh:
-        all_cols_raw = next(csv.reader(fh))
-
-    # Strip whitespace from every column name.  CSV files exported from some
-    # tools include a space after each delimiter (e.g. "COL1, BD_MEDI:COND:1"),
-    # which makes csv.reader return " BD_MEDI:COND:1" — a leading space that
-    # silently breaks startswith("BD_").  PyArrow must receive the raw (un-stripped)
-    # name to match the literal CSV header, so we keep both forms.
-    all_cols = [c.strip() for c in all_cols_raw]
-    # Map stripped → first matching raw name (for PyArrow include_columns).
-    stripped_to_raw: dict = {}
-    for raw, stripped in zip(all_cols_raw, all_cols):
-        if stripped not in stripped_to_raw:
-            stripped_to_raw[stripped] = raw
-
-    bd_cols_raw = [c for c in all_cols if c.startswith("BD_")]
-    non_bd_cols = [c for c in all_cols if not c.startswith("BD_")]
-
-    if bd_filter is not None:
-        bd_cols_to_read = [
-            c for c in bd_cols_raw
-            if c in bd_filter or sub(r":\d+$", "", c) in bd_filter
-        ]
-        logger.info(
-            f"  BD_ column selection: {len(bd_cols_to_read)} of "
-            f"{len(bd_cols_raw)} columns selected via BD_LIST"
-        )
-    else:
-        bd_cols_to_read = bd_cols_raw
-
-    cols_to_read = non_bd_cols + bd_cols_to_read
-
-    _checkpoint(
-        f"formNulls: streaming CSV '{os.path.basename(csv_path)}' "
-        f"({len(cols_to_read)} cols: {len(non_bd_cols)} cohort/demo + "
-        f"{len(bd_cols_to_read)} BD_)",
-        logger,
-    )
-
-    # Compute rename mapping (strip BD_MEDI: numeric Dexter suffix).
-    # All names here are already stripped of whitespace.
-    change_colnames = {k: sub(r":\d+$", "", k)
-                       for k in cols_to_read if k.startswith("BD_MEDI:")}
-
-    # Dedup: keep only the first occurrence of each post-rename column name.
-    seen: set = set()
-    final_cols_stripped: list = []
-    for c in cols_to_read:
-        renamed = change_colnames.get(c, c)
-        if renamed not in seen:
-            seen.add(renamed)
-            final_cols_stripped.append(c)
-
-    # PyArrow include_columns / column_types must use the raw (un-stripped) names
-    # that appear literally in the CSV header.
-    final_cols_raw = [stripped_to_raw[c] for c in final_cols_stripped]
-    final_cols_renamed = [change_colnames.get(c, c) for c in final_cols_stripped]
-
-    # Force every selected column to string type; replace "" with null at parse time.
-    # This avoids both Polars streaming limitations and PyArrow's own type inference
-    # (which could silently coerce patient IDs or date strings to numeric types).
-    col_types = {c: pa.string() for c in final_cols_raw}
-    convert_opts = pa_csv.ConvertOptions(
-        strings_can_be_null=True,
-        null_values=[""],
-        column_types=col_types,
-        include_columns=final_cols_raw,
-    )
-    read_opts = pa_csv.ReadOptions(block_size=block_size_mb * 1024 * 1024)
-
-    reader = pa_csv.open_csv(csv_path, read_options=read_opts, convert_options=convert_opts)
-
-    writer = None
-    try:
-        for batch in reader:
-            renamed = batch.rename_columns(final_cols_renamed)
-            if writer is None:
-                writer = pq.ParquetWriter(out_path, renamed.schema)
-            writer.write_batch(renamed)
-    finally:
-        if writer:
-            writer.close()
-
-
+def preprocessing(
         dir_data: str,
         config_preproc: dict,
         date_fmt: str = "%Y-%m-%d",
@@ -185,48 +79,80 @@ def _csv_to_parquet_streaming(
 
     for file_ in filesToFormat:
         if file_[-3:] == "csv":
-            file_root_ = file_[:-4]
-            out_parquet = f"{dir_data}{file_root_}_formNulls.parquet"
-            _csv_to_parquet_streaming(
-                csv_path=f"{dir_data}{file_}",
-                out_path=out_parquet,
-                bd_filter=bd_filter,
-                logger=logger,
+            # Read only the CSV header — no data loaded.
+            with open(f"{dir_data}{file_}", "r", newline="") as _fh:
+                _all_cols_raw = next(csv.reader(_fh))
+
+            # Strip whitespace. CSV exports from some tools include a space after
+            # each delimiter ("COL1, BD_MEDI:COND:1"), making csv.reader return
+            # " BD_MEDI:COND:1" with a leading space that breaks startswith("BD_").
+            # Polars scan_csv strips names automatically; we must do it explicitly here.
+            _all_cols = [c.strip() for c in _all_cols_raw]
+
+            _bd_cols_raw = [c for c in _all_cols if c.startswith("BD_")]
+            _non_bd_cols = [c for c in _all_cols if not c.startswith("BD_")]
+
+            if bd_filter is not None:
+                _bd_cols_to_read = [
+                    c for c in _bd_cols_raw
+                    if c in bd_filter or sub(r":\d+$", "", c) in bd_filter
+                ]
+                logger.info(
+                    f"  BD_ column selection: {len(_bd_cols_to_read)} of "
+                    f"{len(_bd_cols_raw)} columns selected via BD_LIST"
+                )
+            else:
+                _bd_cols_to_read = _bd_cols_raw
+
+            _cols_to_read = _non_bd_cols + _bd_cols_to_read
+            _checkpoint(
+                f"formNulls: scanning CSV '{file_}' "
+                f"({len(_cols_to_read)} cols: {len(_non_bd_cols)} cohort/demo + "
+                f"{len(_bd_cols_to_read)} BD_)",
+                logger,
             )
-            _checkpoint(f"formNulls: {file_} → parquet complete", logger)
+            # Polars scan_csv also strips column name whitespace, so the stripped
+            # names in _cols_to_read match what Polars exposes in the schema.
+            dat = pl.scan_csv(
+                f"{dir_data}{file_}",
+                infer_schema_length=0,
+                low_memory=True,
+            ).select(_cols_to_read)
+            col_names_for_nulls = _cols_to_read
+            file_root_ = file_[:-4]
 
         elif file_[-7:] == "parquet":
-            # Parquet inputs are already typed; apply null replacement via Polars streaming.
-            file_root_ = file_[:-8]
             dat = pl.scan_parquet(f"{dir_data}{file_}")
             col_names_for_nulls = dat.collect_schema().names()
-
-            dat = dat.with_columns([
-                pl.when(pl.col(c) == "")
-                  .then(pl.lit(None, dtype=pl.String))
-                  .otherwise(pl.col(c))
-                  .alias(c)
-                for c in col_names_for_nulls
-            ])
-
-            change_colnames = {k: sub(r":\d+$", "", k)
-                               for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
-            seen_p: set = set()
-            cols_to_keep = []
-            for col_name in col_names_for_nulls:
-                renamed = change_colnames.get(col_name, col_name)
-                if renamed not in seen_p:
-                    seen_p.add(renamed)
-                    cols_to_keep.append(col_name)
-            change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
-            dat = dat.select(cols_to_keep).rename(change_colnames_kept)
-
-            _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
-            dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
-            _checkpoint("formNulls: sink_parquet complete", logger)
+            file_root_ = file_[:-8]
         else:
             raise Exception("File type not recognised")
+
+        dat = dat.with_columns([
+            pl.when(pl.col(c) == "")
+              .then(pl.lit(None, dtype=pl.String))
+              .otherwise(pl.col(c))
+              .alias(c)
+            for c in col_names_for_nulls
+        ])
+
+        change_colnames = {k: sub(r":\d+$", "", k)
+                           for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
+        seen: set = set()
+        cols_to_keep = []
+        for col_name in col_names_for_nulls:
+            renamed = change_colnames.get(col_name, col_name)
+            if renamed not in seen:
+                seen.add(renamed)
+                cols_to_keep.append(col_name)
+        change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+        dat = dat.select(cols_to_keep).rename(change_colnames_kept)
+
+        _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
+        dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
+        _checkpoint("formNulls: sink_parquet complete", logger)
     logger.info("    Formatting null values finished")
+    del dat
 
     ###LinkingAurumGold############################################################
     if config_preproc["filename"] is None:
