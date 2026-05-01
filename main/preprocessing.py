@@ -116,8 +116,18 @@ def preprocessing(
         # rm numeric suffix from Dexter out (assumes unique codelist names)
         change_colnames = {k: sub(r":\d+$", "", k)
                            for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
-        if change_colnames:
-            dat = dat.rename(change_colnames)
+
+        # Drop columns that would become duplicates after renaming (keep first occurrence)
+        seen: set = set()
+        cols_to_keep = []
+        for col_name in col_names_for_nulls:
+            renamed = change_colnames.get(col_name, col_name)
+            if renamed not in seen:
+                seen.add(renamed)
+                cols_to_keep.append(col_name)
+
+        change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+        dat = dat.select(cols_to_keep).rename(change_colnames_kept)
 
         dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
     logger.info("    Formatting null values finished")
