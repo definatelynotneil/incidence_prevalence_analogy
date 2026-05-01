@@ -7,10 +7,25 @@ from itertools import repeat
 import logging
 from re import sub
 import yaml
+import resource
 
 import polars as pl
 import pyarrow.dataset as ds
 from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
+
+def _mem_gb() -> str:
+    """Return current RSS memory usage as a formatted string."""
+    rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports in kB; macOS in bytes
+    rss_gb = rss_bytes / (1024 ** 2) if sys.platform != "darwin" else rss_bytes / (1024 ** 3)
+    return f"{rss_gb:.1f} GB"
+
+
+def _checkpoint(label: str, logger) -> None:
+    msg = f"[MEM {_mem_gb()}] {label}"
+    print(msg, flush=True)
+    logger.info(msg)
+
 
 def preprocessing(
         dir_data: str,
@@ -29,6 +44,8 @@ def preprocessing(
     ##
 
     flag_temp_file: bool = False
+
+    _checkpoint("preprocessing() started", logger)
 
     ## Format Null ################################################################
     logger.info("Formatting null values")
@@ -86,9 +103,16 @@ def preprocessing(
                 _bd_cols_to_read = _bd_cols_raw
 
             _cols_to_read = _non_bd_cols + _bd_cols_to_read
+            _checkpoint(
+                f"formNulls: scanning CSV '{file_}' "
+                f"({len(_cols_to_read)} cols: {len(_non_bd_cols)} cohort/demo + "
+                f"{len(_bd_cols_to_read)} BD_)",
+                logger,
+            )
             dat = pl.scan_csv(
                 f"{dir_data}{file_}",
                 infer_schema_length=0,
+                low_memory=True,
             ).select(_cols_to_read)
             col_names_for_nulls = _cols_to_read  # all read as String with infer_schema_length=0
             file_root_ = file_[:-4]
@@ -128,7 +152,9 @@ def preprocessing(
         change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
         dat = dat.select(cols_to_keep).rename(change_colnames_kept)
 
+        _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
         dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
+        _checkpoint("formNulls: sink_parquet complete", logger)
     logger.info("    Formatting null values finished")
     del dat
 
@@ -259,6 +285,7 @@ def preprocessing(
         logger.info("    Linking IMD finished")
 
     os.rename(f"{dir_data}{outFile}", f"{dir_data}dat_processed.parquet")
+    _checkpoint("dat_processed.parquet written", logger)
 
     ###DerivedColumns##############################################################
     derived_cfg = config_preproc.get("derived_columns") or {}
@@ -280,6 +307,7 @@ def preprocessing(
         logger.info("    Deriving extra columns finished")
 
     ###CreateBatchFiles############################################################
+    _checkpoint("create_batch_files check", logger)
     if config_incprev is not None and config_incprev.get("create_batch_files"):
         logger.info("Creating per-batch parquet files")
         print("Creating per-batch parquet files (column-wise batching)")
@@ -307,6 +335,7 @@ def preprocessing(
             config_incprev.get("col_end_date", "END_DATE"),
         ]
 
+        _checkpoint(f"create_batch_parquet_files: {len(bd_list)} conditions, batch_size={config_incprev.get('batch_size', 10)}", logger)
         create_batch_parquet_files(
             in_path=processed_path,
             out_dir=dir_data,
@@ -315,4 +344,5 @@ def preprocessing(
             core_cols=core_cols,
             demo_cols=demo_cols,
         )
+        _checkpoint("create_batch_parquet_files complete", logger)
         logger.info("    Creating per-batch parquet files finished")
