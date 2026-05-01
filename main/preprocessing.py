@@ -51,7 +51,19 @@ def _csv_to_parquet_streaming(
 
     # Read only the header line — no data loaded.
     with open(csv_path, "r", newline="") as fh:
-        all_cols = next(csv.reader(fh))
+        all_cols_raw = next(csv.reader(fh))
+
+    # Strip whitespace from every column name.  CSV files exported from some
+    # tools include a space after each delimiter (e.g. "COL1, BD_MEDI:COND:1"),
+    # which makes csv.reader return " BD_MEDI:COND:1" — a leading space that
+    # silently breaks startswith("BD_").  PyArrow must receive the raw (un-stripped)
+    # name to match the literal CSV header, so we keep both forms.
+    all_cols = [c.strip() for c in all_cols_raw]
+    # Map stripped → first matching raw name (for PyArrow include_columns).
+    stripped_to_raw: dict = {}
+    for raw, stripped in zip(all_cols_raw, all_cols):
+        if stripped not in stripped_to_raw:
+            stripped_to_raw[stripped] = raw
 
     bd_cols_raw = [c for c in all_cols if c.startswith("BD_")]
     non_bd_cols = [c for c in all_cols if not c.startswith("BD_")]
@@ -78,28 +90,33 @@ def _csv_to_parquet_streaming(
     )
 
     # Compute rename mapping (strip BD_MEDI: numeric Dexter suffix).
+    # All names here are already stripped of whitespace.
     change_colnames = {k: sub(r":\d+$", "", k)
                        for k in cols_to_read if k.startswith("BD_MEDI:")}
 
     # Dedup: keep only the first occurrence of each post-rename column name.
     seen: set = set()
-    final_cols_original: list = []
+    final_cols_stripped: list = []
     for c in cols_to_read:
         renamed = change_colnames.get(c, c)
         if renamed not in seen:
             seen.add(renamed)
-            final_cols_original.append(c)
-    final_cols_renamed = [change_colnames.get(c, c) for c in final_cols_original]
+            final_cols_stripped.append(c)
+
+    # PyArrow include_columns / column_types must use the raw (un-stripped) names
+    # that appear literally in the CSV header.
+    final_cols_raw = [stripped_to_raw[c] for c in final_cols_stripped]
+    final_cols_renamed = [change_colnames.get(c, c) for c in final_cols_stripped]
 
     # Force every selected column to string type; replace "" with null at parse time.
     # This avoids both Polars streaming limitations and PyArrow's own type inference
     # (which could silently coerce patient IDs or date strings to numeric types).
-    col_types = {c: pa.string() for c in final_cols_original}
+    col_types = {c: pa.string() for c in final_cols_raw}
     convert_opts = pa_csv.ConvertOptions(
         strings_can_be_null=True,
         null_values=[""],
         column_types=col_types,
-        include_columns=final_cols_original,
+        include_columns=final_cols_raw,
     )
     read_opts = pa_csv.ReadOptions(block_size=block_size_mb * 1024 * 1024)
 
