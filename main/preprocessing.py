@@ -1,7 +1,9 @@
 import sys
 import os
+import ctypes
 import datetime
 import csv
+import gc
 import multiprocessing as mp
 from itertools import repeat
 import logging
@@ -27,63 +29,19 @@ def _checkpoint(label: str, logger) -> None:
     logger.info(msg)
 
 
-def _formNulls_file(
-    dir_data: str,
-    file_: str,
-    cols_to_read: list,
-    col_names_for_nulls: list,
-    file_root_: str,
-    change_colnames: dict,
-    is_csv: bool,
-    path_log: str,
-) -> None:
-    """Process one CSV/parquet file into *_formNulls.parquet.
+def _free_memory() -> None:
+    """Release Python objects and return freed pages to the OS.
 
-    Runs inside a spawned subprocess so all Polars memory is returned to the OS
-    before the next file starts, preventing cumulative RSS from exceeding the
-    SLURM job limit when multiple wide CSV files are processed in sequence.
+    gc.collect() drops Python-level references; malloc_trim(0) tells the glibc
+    allocator to actually hand those pages back to the OS. Without malloc_trim,
+    RSS stays high even after large Polars frames are deleted because glibc
+    holds onto the arena for reuse.
     """
-    import logging
-    import polars as pl
-
-    logging.basicConfig(
-        filename=path_log,
-        filemode="a",
-        format="%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-        level=logging.DEBUG,
-    )
-    _logger = logging.getLogger()
-
-    if is_csv:
-        dat = (
-            pl.scan_csv(f"{dir_data}{file_}", infer_schema_length=0, low_memory=True)
-            .select(cols_to_read)
-        )
-    else:
-        dat = pl.scan_parquet(f"{dir_data}{file_}")
-
-    dat = dat.with_columns([
-        pl.when(pl.col(c) == "")
-          .then(pl.lit(None, dtype=pl.String))
-          .otherwise(pl.col(c))
-          .alias(c)
-        for c in col_names_for_nulls
-    ])
-
-    seen: set = set()
-    cols_to_keep = []
-    for col_name in col_names_for_nulls:
-        renamed = change_colnames.get(col_name, col_name)
-        if renamed not in seen:
-            seen.add(renamed)
-            cols_to_keep.append(col_name)
-    change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
-    dat = dat.select(cols_to_keep).rename(change_colnames_kept)
-
-    out_path = f"{dir_data}{file_root_}_formNulls.parquet"
-    dat.sink_parquet(out_path, row_group_size=100_000)
-    _logger.info(f"  _formNulls_file: wrote {out_path}")
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 
 def preprocessing(
@@ -199,47 +157,53 @@ def preprocessing(
                 _bd_cols_to_read = _bd_cols_raw
 
             _cols_to_read = _non_bd_cols + _bd_cols_to_read
-            col_names_for_nulls = _cols_to_read
-            file_root_ = file_[:-4]
-            is_csv_ = True
             _checkpoint(
-                f"formNulls: dispatching '{file_}' to subprocess "
+                f"formNulls: scanning CSV '{file_}' "
                 f"({len(_cols_to_read)} cols: {len(_non_bd_cols)} cohort/demo + "
                 f"{len(_bd_cols_to_read)} BD_)",
                 logger,
             )
+            dat = pl.scan_csv(
+                f"{dir_data}{file_}",
+                infer_schema_length=0,
+                low_memory=True,
+            ).select(_cols_to_read)
+            col_names_for_nulls = _cols_to_read
+            file_root_ = file_[:-4]
 
         elif file_[-7:] == "parquet":
-            _tmp_scan = pl.scan_parquet(f"{dir_data}{file_}")
-            col_names_for_nulls = _tmp_scan.collect_schema().names()
-            _cols_to_read = col_names_for_nulls
+            dat = pl.scan_parquet(f"{dir_data}{file_}")
+            col_names_for_nulls = dat.collect_schema().names()
             file_root_ = file_[:-8]
-            is_csv_ = False
-            del _tmp_scan
-            _checkpoint(f"formNulls: dispatching '{file_}' to subprocess", logger)
         else:
             raise Exception("File type not recognised")
 
+        dat = dat.with_columns([
+            pl.when(pl.col(c) == "")
+              .then(pl.lit(None, dtype=pl.String))
+              .otherwise(pl.col(c))
+              .alias(c)
+            for c in col_names_for_nulls
+        ])
+
         change_colnames = {k: sub(r":\d+$", "", k)
                            for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
+        seen: set = set()
+        cols_to_keep = []
+        for col_name in col_names_for_nulls:
+            renamed = change_colnames.get(col_name, col_name)
+            if renamed not in seen:
+                seen.add(renamed)
+                cols_to_keep.append(col_name)
+        change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+        dat = dat.select(cols_to_keep).rename(change_colnames_kept)
 
-        # Each file is processed in a spawned subprocess so that Polars' OS-level
-        # memory allocations are fully reclaimed before the next file starts.
-        # Without this, Gold's ~37 GB peak stays resident when Aurum begins, and
-        # the combined RSS exceeds the 60 GB SLURM limit.
-        _ctx = mp.get_context("spawn")
-        _proc = _ctx.Process(
-            target=_formNulls_file,
-            args=(dir_data, file_, _cols_to_read, col_names_for_nulls, file_root_,
-                  change_colnames, is_csv_, path_log),
-        )
-        _proc.start()
-        _proc.join()
-        if _proc.exitcode != 0:
-            raise RuntimeError(
-                f"formNulls worker exited with code {_proc.exitcode} for {file_!r}"
-            )
-        _checkpoint(f"formNulls: complete → {file_root_}_formNulls.parquet", logger)
+        _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
+        dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet", row_group_size=100_000)
+        _checkpoint("formNulls: sink_parquet complete", logger)
+        del dat
+        _free_memory()
+        _checkpoint("formNulls: memory released", logger)
     logger.info("    Formatting null values finished")
 
     ###LinkingAurumGold############################################################
