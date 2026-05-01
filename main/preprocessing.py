@@ -89,8 +89,7 @@ def preprocessing(
             dat = pl.scan_csv(
                 f"{dir_data}{file_}",
                 infer_schema_length=0,
-                columns=_cols_to_read,
-            )
+            ).select(_cols_to_read)
             col_names_for_nulls = _cols_to_read  # all read as String with infer_schema_length=0
             file_root_ = file_[:-4]
 
