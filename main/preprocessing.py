@@ -114,7 +114,9 @@ def preprocessing(
                     col_body = sub(r"^BD_MEDI:", "", stripped)  # e.g. "CPRD_ACTINIC_KERATOSIS"
                     for entry in bd_filter:
                         cond = entry[3:] if entry.startswith("BD_") else entry
-                        if cond and col_body.endswith(cond):
+                        # Normalize underscores: Aurum columns drop underscores from
+                        # condition names (ACTINICKERATOSIS vs ACTINIC_KERATOSIS).
+                        if cond and col_body.replace("_", "").endswith(cond.replace("_", "")):
                             return True
                     return False
 
