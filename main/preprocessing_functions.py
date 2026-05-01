@@ -439,9 +439,10 @@ def combineLevels(
         dict_merge: dict, #column: newName:(level1, level2, ...), ...
         file_type = "parquet",
         outFile="dat_updatedLevels.parquet",
+        low_memory: bool = True,
         ):
     if file_type == "parquet":
-        q1 = scan_parquet(f"{path_dat}{file_dat}")#, infer_schema_length=0)
+        q1 = scan_parquet(f"{path_dat}{file_dat}", low_memory=low_memory)
     else:
         q1 = scan_csv(f"{path_dat}{file_dat}", infer_schema_length=0)
 
@@ -459,7 +460,10 @@ def combineLevels(
                         .alias(col_lab)
                         )
                     )
-    q1.collect().write_parquet(f"{path_dat}{outFile}")
+    if low_memory:
+        q1.sink_parquet(f"{path_dat}{outFile}")
+    else:
+        q1.collect().write_parquet(f"{path_dat}{outFile}")
 
 
 

@@ -118,6 +118,7 @@ def preprocessing(
                 config_preproc["col_patid_cprd"],
                 config_preproc["col_patid_hes"],
                 f"{dir_data}dat_hesLinked.parquet",
+                low_memory=True,
                 )
         if flag_temp_file:
             os.remove(f"{dir_data}{outFile}")
@@ -144,7 +145,7 @@ def preprocessing(
                 outFile,
                 config_preproc["mergeCols_AtoB"],
                 file_type = file_type,
-                low_memory = False,
+                low_memory = True,
                 logger=logger,
                 outFile="condMerged.parquet",
                 date_fmt=date_fmt,
@@ -194,7 +195,7 @@ def preprocessing(
                 outFile,
                 dir_data,
                 file_map = config_preproc["imd_map_file"],
-                low_memory=False,
+                low_memory=True,
                 is_parquet=is_parquet,
                 logger=logger,
                 outFile="dat_processed.parquet",
