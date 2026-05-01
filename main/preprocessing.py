@@ -89,14 +89,47 @@ def preprocessing(
             # Polars scan_csv strips names automatically; we must do it explicitly here.
             _all_cols = [c.strip() for c in _all_cols_raw]
 
+            # BD_ columns are the binary derived condition indicators used by the
+            # pipeline.  B_MEDI: (single underscore) and B. columns are Dexter
+            # intermediate outputs that are never read downstream — always exclude
+            # them to roughly halve the working column count.
             _bd_cols_raw = [c for c in _all_cols if c.startswith("BD_")]
-            _non_bd_cols = [c for c in _all_cols if not c.startswith("BD_")]
+            _non_bd_cols = [c for c in _all_cols
+                            if not c.startswith("BD_")
+                            and not c.startswith("B_MEDI:")
+                            and not c.startswith("B.")]
 
             if bd_filter is not None:
-                _bd_cols_to_read = [
-                    c for c in _bd_cols_raw
-                    if c in bd_filter or sub(r":\d+$", "", c) in bd_filter
-                ]
+                def _bd_matches(col: str) -> bool:
+                    # Exact match (BD_LIST contains literal raw or post-rename name)
+                    if col in bd_filter:
+                        return True
+                    stripped = sub(r":\d+$", "", col)   # strip Dexter numeric suffix
+                    if stripped in bd_filter:
+                        return True
+                    # Flexible match: BD_LIST uses "BD_CONDNAME" but column is
+                    # "BD_MEDI:SOURCE_CONDNAME:N" (e.g. "BD_MEDI:CPRD_ACTINIC_KERATOSIS:168").
+                    # Extract the body after "BD_MEDI:" then check whether any BD_LIST
+                    # entry's condition name (stripped of "BD_" prefix) is a suffix of it.
+                    col_body = sub(r"^BD_MEDI:", "", stripped)  # e.g. "CPRD_ACTINIC_KERATOSIS"
+                    for entry in bd_filter:
+                        cond = entry[3:] if entry.startswith("BD_") else entry
+                        if cond and col_body.endswith(cond):
+                            return True
+                    return False
+
+                _bd_cols_to_read = [c for c in _bd_cols_raw if _bd_matches(c)]
+
+                if not _bd_cols_to_read:
+                    # Naming convention mismatch — include all BD_ columns rather
+                    # than silently producing a parquet with no condition columns.
+                    logger.warning(
+                        "BD_LIST filter matched 0 BD_ columns; "
+                        "including all BD_ columns. Check that BD_LIST names "
+                        "match the condition identifiers in the CSV."
+                    )
+                    _bd_cols_to_read = _bd_cols_raw
+
                 logger.info(
                     f"  BD_ column selection: {len(_bd_cols_to_read)} of "
                     f"{len(_bd_cols_raw)} columns selected via BD_LIST"
