@@ -33,6 +33,13 @@ def preprocessing(
     ## Format Null ################################################################
     logger.info("Formatting null values")
 
+    # Build a set of BD_ column names actually needed (from BD_LIST in incprev config).
+    # When the raw CSV has hundreds of condition columns but only a few are needed,
+    # reading only those columns avoids loading the entire wide file into RAM.
+    bd_filter: set | None = None
+    if config_incprev and config_incprev.get("BD_LIST"):
+        bd_filter = set(str(b) for b in config_incprev["BD_LIST"])
+
     if config_preproc["filename"] is None:
         filesToFormat = [config_preproc['filename_gold'],
                          config_preproc['filename_aurum'],]
@@ -55,27 +62,62 @@ def preprocessing(
 
     for file_ in filesToFormat:
         if file_[-3:] == "csv":
-            dat = pl.scan_csv(f"{dir_data}{file_}", infer_schema_length=0)
+            # Read only the CSV header to determine which columns exist — no data loaded.
+            with open(f"{dir_data}{file_}", "r", newline="") as _fh:
+                _all_cols = next(csv.reader(_fh))
+
+            # Separate BD_ columns from cohort/demographic columns.
+            _bd_cols_raw = [c for c in _all_cols if c.startswith("BD_")]
+            _non_bd_cols = [c for c in _all_cols if not c.startswith("BD_")]
+
+            # When BD_LIST is configured, read only those BD_ columns.
+            # BD_MEDI: columns carry a numeric Dexter suffix (e.g. BD_MEDI:COND:1);
+            # match against the stripped name (BD_MEDI:COND) as well as the raw name.
+            if bd_filter is not None:
+                _bd_cols_to_read = [
+                    c for c in _bd_cols_raw
+                    if c in bd_filter or sub(r":\d+$", "", c) in bd_filter
+                ]
+                logger.info(
+                    f"  BD_ column selection: {len(_bd_cols_to_read)} of "
+                    f"{len(_bd_cols_raw)} columns selected via BD_LIST"
+                )
+            else:
+                _bd_cols_to_read = _bd_cols_raw
+
+            _cols_to_read = _non_bd_cols + _bd_cols_to_read
+            dat = pl.scan_csv(
+                f"{dir_data}{file_}",
+                infer_schema_length=0,
+                columns=_cols_to_read,
+            )
+            col_names_for_nulls = _cols_to_read  # all read as String with infer_schema_length=0
             file_root_ = file_[:-4]
+
         elif file_[-7:] == "parquet":
             dat = pl.scan_parquet(f"{dir_data}{file_}")
+            col_names_for_nulls = dat.collect_schema().names()
             file_root_ = file_[:-8]
         else:
             raise Exception("File type not recognised")
-        dat = (
-                dat
-                .with_columns(
-                    pl.when(pl.all().str.len_chars() == 0)
-                        .then(None)
-                        .otherwise(pl.all())
-                        .name.keep()
-                    )
-                )
+
+        # Replace empty strings with null using explicit per-column expressions.
+        # pl.all() inside when/then/otherwise is not guaranteed to be streamable
+        # in Polars and can cause a silent full-collect fallback, loading the
+        # entire dataset into RAM.  Explicit named columns avoid this.
+        dat = dat.with_columns([
+            pl.when(pl.col(c) == "")
+              .then(pl.lit(None, dtype=pl.String))
+              .otherwise(pl.col(c))
+              .alias(c)
+            for c in col_names_for_nulls
+        ])
 
         # rm numeric suffix from Dexter out (assumes unique codelist names)
-        change_colnames = {k:"" for k in dat.collect_schema().names() if k.startswith("BD_MEDI:")}
-        change_colnames = {k:sub(r":\d+$", "", k) for k in change_colnames.keys()}
-        dat = dat.rename(change_colnames)
+        change_colnames = {k: sub(r":\d+$", "", k)
+                           for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
+        if change_colnames:
+            dat = dat.rename(change_colnames)
 
         dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
     logger.info("    Formatting null values finished")
