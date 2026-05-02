@@ -13,7 +13,7 @@ import resource
 
 import polars as pl
 import pyarrow.dataset as ds
-from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
+from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns, coalesce_bd_source_cols
 
 def _mem_gb() -> str:
     """Return current RSS memory usage as a formatted string.
@@ -310,6 +310,21 @@ def preprocessing(
         flag_temp_file = True
     else:
         outFile = config_preproc["filename"]
+
+    ###CoalesceSourceBDCols########################################################
+    # Normalise BD_MEDI:CPRD_*/BD_MEDI:CPRDAURUM_*/BD_MEDI:* columns into clean
+    # BD_ columns so downstream incprev analysis can use exact column names from
+    # BD_LIST without any fuzzy matching.  Gold (CPRD_) and Aurum (CPRDAURUM_)
+    # variants of the same condition are coalesced into one column per condition.
+    print("Coalescing BD source columns")
+    logger.info("Coalescing BD_ source columns")
+    _coalesced_path = f"{dir_data}dat_coalesced.parquet"
+    coalesce_bd_source_cols(f"{dir_data}{outFile}", _coalesced_path, logger)
+    if flag_temp_file:
+        os.remove(f"{dir_data}{outFile}")
+    flag_temp_file = True
+    outFile = "dat_coalesced.parquet"
+    _checkpoint("Coalescing BD_ source columns complete", logger)
 
     ###LinkHes#####################################################################
     if config_preproc["path_hes"] is not None:

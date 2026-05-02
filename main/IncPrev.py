@@ -11,14 +11,12 @@ from main.ANALOGY_SCIENTIFIC.IncPrevMethods_polars import IncPrev
 
 
 def _resolve_bd_list(bd_list: list, filename: str) -> list:
-    """Map BD_LIST friendly names to actual column names in the data file.
+    """Map BD_LIST entries to actual column names in the data file.
 
-    Config entries like "BD_ACTINIC_KERATOSIS" need to match actual column
-    names like "BD_MEDI:CPRD_ACTINIC_KERATOSIS" that come out of preprocessing.
-    Uses the same normalisation as the preprocessing BD_LIST filter:
-    strip the BD_MEDI: source prefix, strip the Dexter :N numeric suffix,
-    and compare without underscores so that Gold-style "ACTINIC_KERATOSIS"
-    and Aurum-style "ACTINICKERATOSIS" both resolve correctly.
+    Preprocessing coalesces source-prefixed columns (BD_MEDI:CPRD_*, etc.)
+    into clean BD_CONDNAME columns, so exact matches are expected for
+    well-formed BD_LIST entries.  Fuzzy matching is retained as a fallback
+    for data files that have not been through the coalescing step.
     """
     if filename.endswith(".parquet"):
         actual_bd = [c for c in ds.dataset(filename, format="parquet").schema.names
@@ -30,23 +28,33 @@ def _resolve_bd_list(bd_list: list, filename: str) -> list:
     else:
         return bd_list
 
+    actual_bd_set = set(actual_bd)
     resolved = []
     for entry in bd_list:
-        if entry in actual_bd:
+        # Exact match (expected case after preprocessing coalescing)
+        if entry in actual_bd_set:
             resolved.append(entry)
             continue
-        cond = entry[3:] if entry.startswith("BD_") else entry  # strip "BD_" prefix
+        # Fuzzy fallback: normalise underscores and strip BD_MEDI: source prefix
+        cond = entry[3:] if entry.startswith("BD_") else entry
+        cond_norm = cond.replace("_", "").upper()
+        # Prefer source-prefixed columns (CPRD_ etc.) over bare BD_MEDI: columns
+        # to avoid resolving to a non-existent bare name.
         hit = next(
             (col for col in actual_bd
-             if sub(r"^BD_MEDI:", "", sub(r":\d+$", "", col))
-                .replace("_", "")
-                .endswith(cond.replace("_", ""))),
+             if "CPRD" in col
+             and sub(r"^BD_MEDI:[A-Z0-9]+_", "", col)
+                .replace("_", "").upper() == cond_norm),
             None,
         )
-        if hit:
-            resolved.append(hit)
-        else:
-            resolved.append(entry)  # keep original; will surface a clear error later
+        if hit is None:
+            hit = next(
+                (col for col in actual_bd
+                 if sub(r"^BD_MEDI:", "", col)
+                    .replace("_", "").upper() == cond_norm),
+                None,
+            )
+        resolved.append(hit if hit is not None else entry)
     return resolved
 
 

@@ -578,6 +578,90 @@ def derive_columns(in_path: str, out_path: str, derived_config: dict) -> None:
     lf.sink_parquet(out_path)
 
 
+def coalesce_bd_source_cols(in_path: str, out_path: str, logger=None) -> None:
+    """Coalesce source-prefixed BD_MEDI: columns into clean BD_ columns.
+
+    After Gold/Aurum linking, condition columns carry source-specific prefixes:
+      BD_MEDI:CPRD_ACTINIC_KERATOSIS    (Gold, underscores in name)
+      BD_MEDI:CPRDAURUM_ACTINICKERATOSIS (Aurum, no underscores)
+      BD_MEDI:ACTINIC_KERATOSIS          (bare, no source sub-prefix)
+
+    Each patient has a non-null value in at most one source's column.  This
+    function groups these variants by normalised condition name (underscores
+    removed, uppercase), coalesces each group via pl.coalesce(), and renames
+    the result to a clean BD_CONDNAME column (using Gold-style underscored
+    name when a CPRD_ column exists, otherwise the bare or Aurum name).
+
+    Non-BD_MEDI: columns are passed through unchanged.
+    """
+    import re
+    import polars as pl
+
+    schema_names = pl.scan_parquet(in_path).collect_schema().names()
+    source_bd = [c for c in schema_names if c.startswith("BD_MEDI:")]
+    non_source = [c for c in schema_names if not c.startswith("BD_MEDI:")]
+
+    if not source_bd:
+        if logger:
+            logger.info("coalesce_bd_source_cols: no BD_MEDI: columns found, skipping")
+        if in_path != out_path:
+            import shutil
+            shutil.copy2(in_path, out_path)
+        return
+
+    def norm_key(col: str) -> str:
+        """Normalise condition name for cross-source matching."""
+        # Strip BD_MEDI:CPRD_ or BD_MEDI:CPRDAURUM_ prefix
+        body = re.sub(r"^BD_MEDI:CPRDAURUM_", "", col)
+        body = re.sub(r"^BD_MEDI:CPRD_", "", body)
+        # Also handle bare BD_MEDI:CONDNAME (no source sub-prefix)
+        body = re.sub(r"^BD_MEDI:", "", body)
+        return body.replace("_", "").upper()
+
+    def canonical_name(group_cols: list) -> str:
+        """Return the canonical clean BD_ name for a group.
+
+        Prefers the CPRD (Gold) column name because it preserves underscores,
+        matching typical BD_LIST config entries like BD_ACTINIC_KERATOSIS.
+        """
+        for c in group_cols:
+            if c.startswith("BD_MEDI:CPRD_") and not c.startswith("BD_MEDI:CPRDAURUM_"):
+                return "BD_" + c[len("BD_MEDI:CPRD_"):]
+        # Bare BD_MEDI:CONDNAME (no source prefix) — use as-is without BD_MEDI:
+        for c in group_cols:
+            if c.startswith("BD_MEDI:") and not c.startswith("BD_MEDI:CPRD"):
+                return "BD_" + c[len("BD_MEDI:"):]
+        # Aurum only
+        for c in group_cols:
+            if c.startswith("BD_MEDI:CPRDAURUM_"):
+                return "BD_" + c[len("BD_MEDI:CPRDAURUM_"):]
+        return group_cols[0]
+
+    # Group source BD_ columns by normalised condition name
+    groups: dict = {}
+    for col in source_bd:
+        key = norm_key(col)
+        groups.setdefault(key, []).append(col)
+
+    exprs = [pl.col(c) for c in non_source]
+    n_merged = 0
+    for key, cols in groups.items():
+        name = canonical_name(cols)
+        if len(cols) > 1:
+            exprs.append(pl.coalesce(cols).alias(name))
+            n_merged += 1
+        else:
+            exprs.append(pl.col(cols[0]).alias(name))
+
+    pl.scan_parquet(in_path).select(exprs).sink_parquet(out_path, row_group_size=100_000)
+
+    if logger:
+        logger.info(
+            f"coalesce_bd_source_cols: {n_merged} cross-source pairs merged, "
+            f"{len(source_bd)} BD_MEDI: → {len(groups)} clean BD_ columns"
+        )
+
+
 def create_batch_parquet_files(
     in_path: str,
     out_dir: str,
