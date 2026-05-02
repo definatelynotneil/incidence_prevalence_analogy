@@ -141,7 +141,7 @@ class IncPrev():
             self.raw_data
             .with_columns(
                 pl.col([self.DataKeys["INDEX_DATE_COL"],
-                    self.DataKeys["END_DATE_COL"],]).str.strptime(pl.Date, format=self.date_fmt,)
+                    self.DataKeys["END_DATE_COL"],]).str.to_date(format=self.date_fmt)
             )
         )
 
@@ -149,8 +149,8 @@ class IncPrev():
              self.BASELINE_DATE_LIST = [col for col in self.raw_data.columns if col.startswith('BD_')]
 
         self.raw_data = self.raw_data.with_columns(
-            pl.col(self.BASELINE_DATE_LIST).str.strptime(pl.Date,
-                                                         format=self.date_fmt)
+            pl.col(self.BASELINE_DATE_LIST).str.to_date(format=self.date_fmt,
+                                                        strict=False)
         )
 
         #Missing stratification vars set to "null"
@@ -224,7 +224,7 @@ class IncPrev():
             )
             chunk = chunk.with_columns(
                 pl.col([c for c in date_cols if c in chunk.columns])
-                .str.strptime(pl.Date, format=self.date_fmt)
+                .str.to_date(format=self.date_fmt, strict=False)
             )
             existing_catgs = [c for c in catg_cols if c in chunk.columns]
             if existing_catgs:
