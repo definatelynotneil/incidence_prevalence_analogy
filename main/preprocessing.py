@@ -16,9 +16,21 @@ import pyarrow.dataset as ds
 from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
 
 def _mem_gb() -> str:
-    """Return current RSS memory usage as a formatted string."""
+    """Return current RSS memory usage as a formatted string.
+
+    Reads VmRSS from /proc/self/status (current RSS) rather than
+    resource.getrusage().ru_maxrss, which on Linux is the lifetime *peak*
+    and never decreases — making it useless for confirming memory was freed.
+    """
+    try:
+        with open("/proc/self/status") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    return f"{int(_line.split()[1]) / 1024 / 1024:.1f} GB"
+    except Exception:
+        pass
+    # Fallback (macOS or /proc unavailable)
     rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Linux reports in kB; macOS in bytes
     rss_gb = rss_bytes / (1024 ** 2) if sys.platform != "darwin" else rss_bytes / (1024 ** 3)
     return f"{rss_gb:.1f} GB"
 
@@ -32,16 +44,18 @@ def _checkpoint(label: str, logger) -> None:
 def _free_memory() -> None:
     """Release Python objects and return freed pages to the OS.
 
-    gc.collect() drops Python-level references; malloc_trim(0) tells the glibc
-    allocator to actually hand those pages back to the OS. Without malloc_trim,
-    RSS stays high even after large Polars frames are deleted because glibc
-    holds onto the arena for reuse.
+    gc.collect() drops Python references. malloc_trim(0) tells the allocator
+    to return freed arena pages to the OS. We try CDLL(None) first so that
+    if Polars' Rust runtime has loaded jemalloc into the process namespace,
+    we call its malloc_trim (which purges dirty pages) rather than glibc's
+    (which has no effect on jemalloc arenas).
     """
     gc.collect()
-    try:
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except Exception:
-        pass
+    for _lib in (None, "libc.so.6"):
+        try:
+            ctypes.CDLL(_lib).malloc_trim(0)
+        except Exception:
+            pass
 
 
 def preprocessing(
@@ -59,6 +73,13 @@ def preprocessing(
                         level=logging.DEBUG)
     logger = logging.getLogger()
     ##
+
+    # Limit Polars streaming chunk size so each sink_parquet pass buffers at
+    # most ~50 K rows at a time. The default is large enough that a 600-column
+    # CSV can peak at 37 GB even when only 30 columns are selected. This env
+    # var is read by Polars when it builds each streaming plan, not at import
+    # time, so setting it here takes effect for all subsequent sink calls.
+    os.environ["POLARS_STREAMING_CHUNK_SIZE"] = "50000"
 
     flag_temp_file: bool = False
 
