@@ -1,16 +1,104 @@
 import sys
 import os
+import ctypes
 import datetime
 import csv
+import gc
 import multiprocessing as mp
 from itertools import repeat
 import logging
 from re import sub
 import yaml
+import resource
 
 import polars as pl
 import pyarrow.dataset as ds
 from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
+
+def _mem_gb() -> str:
+    """Return current RSS memory usage as a formatted string.
+
+    Reads VmRSS from /proc/self/status (current RSS) rather than
+    resource.getrusage().ru_maxrss, which on Linux is the lifetime *peak*
+    and never decreases — making it useless for confirming memory was freed.
+    """
+    try:
+        with open("/proc/self/status") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    return f"{int(_line.split()[1]) / 1024 / 1024:.1f} GB"
+    except Exception:
+        pass
+    # Fallback (macOS or /proc unavailable)
+    rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_gb = rss_bytes / (1024 ** 2) if sys.platform != "darwin" else rss_bytes / (1024 ** 3)
+    return f"{rss_gb:.1f} GB"
+
+
+def _checkpoint(label: str, logger) -> None:
+    msg = f"[MEM {_mem_gb()}] {label}"
+    print(msg, flush=True)
+    logger.info(msg)
+
+
+def _free_memory() -> None:
+    """Release Python objects and return freed pages to the OS.
+
+    gc.collect() drops Python references. malloc_trim(0) tells the allocator
+    to return freed arena pages to the OS. We try CDLL(None) first so that
+    if Polars' Rust runtime has loaded jemalloc into the process namespace,
+    we call its malloc_trim (which purges dirty pages) rather than glibc's
+    (which has no effect on jemalloc arenas).
+    """
+    gc.collect()
+    for _lib in (None, "libc.so.6"):
+        try:
+            ctypes.CDLL(_lib).malloc_trim(0)
+        except Exception:
+            pass
+
+
+def _formNulls_csv_to_parquet(
+    in_path: str,
+    out_path: str,
+    include_columns: list,
+    rename_map: dict,
+    logger,
+    block_mb: int = 128,
+) -> None:
+    """Stream a wide CSV → parquet using PyArrow's block-wise CSV reader.
+
+    PyArrow's C++ reader skips parsing columns absent from include_columns,
+    so peak memory is proportional to the selected columns only — not the
+    full width of the CSV. Polars' scan_csv streaming can silently fall back
+    to a full collect for certain query plans, causing the entire file to be
+    materialised; this function avoids that path entirely.
+
+    block_mb: raw CSV bytes read per batch. Peak RSS per batch ≈
+    block_mb × (n_selected / n_total) × parse overhead.
+    """
+    import pyarrow as pa
+    import pyarrow.csv as pa_csv
+    import pyarrow.parquet as pq
+
+    final_names = [rename_map.get(c, c) for c in include_columns]
+    schema = pa.schema([(name, pa.string()) for name in final_names])
+
+    convert_opts = pa_csv.ConvertOptions(
+        include_columns=include_columns,
+        null_values=[""],
+        strings_can_be_null=True,
+        column_types={c: pa.string() for c in include_columns},
+    )
+    read_opts = pa_csv.ReadOptions(block_size=block_mb * 1024 * 1024)
+
+    reader = pa_csv.open_csv(in_path, read_options=read_opts, convert_options=convert_opts)
+    with pq.ParquetWriter(out_path, schema) as writer:
+        for batch in reader:
+            writer.write_batch(batch.rename_columns(final_names))
+
+    logger.info(f"  _formNulls_csv_to_parquet: wrote {out_path} ({len(include_columns)} cols)")
+
 
 def preprocessing(
         dir_data: str,
@@ -28,7 +116,16 @@ def preprocessing(
     logger = logging.getLogger()
     ##
 
+    # Limit Polars streaming chunk size so each sink_parquet pass buffers at
+    # most ~50 K rows at a time. The default is large enough that a 600-column
+    # CSV can peak at 37 GB even when only 30 columns are selected. This env
+    # var is read by Polars when it builds each streaming plan, not at import
+    # time, so setting it here takes effect for all subsequent sink calls.
+    os.environ["POLARS_STREAMING_CHUNK_SIZE"] = "50000"
+
     flag_temp_file: bool = False
+
+    _checkpoint("preprocessing() started", logger)
 
     ## Format Null ################################################################
     logger.info("Formatting null values")
@@ -62,22 +159,59 @@ def preprocessing(
 
     for file_ in filesToFormat:
         if file_[-3:] == "csv":
-            # Read only the CSV header to determine which columns exist — no data loaded.
+            # Read only the CSV header — no data loaded.
             with open(f"{dir_data}{file_}", "r", newline="") as _fh:
-                _all_cols = next(csv.reader(_fh))
+                _all_cols_raw = next(csv.reader(_fh))
 
-            # Separate BD_ columns from cohort/demographic columns.
+            # Strip whitespace. CSV exports from some tools include a space after
+            # each delimiter ("COL1, BD_MEDI:COND:1"), making csv.reader return
+            # " BD_MEDI:COND:1" with a leading space that breaks startswith("BD_").
+            # Polars scan_csv strips names automatically; we must do it explicitly here.
+            _all_cols = [c.strip() for c in _all_cols_raw]
+
+            # BD_ columns are the binary derived condition indicators used by the
+            # pipeline.  B_MEDI: (single underscore) and B. columns are Dexter
+            # intermediate outputs that are never read downstream — always exclude
+            # them to roughly halve the working column count.
             _bd_cols_raw = [c for c in _all_cols if c.startswith("BD_")]
-            _non_bd_cols = [c for c in _all_cols if not c.startswith("BD_")]
+            _non_bd_cols = [c for c in _all_cols
+                            if not c.startswith("BD_")
+                            and not c.startswith("B_MEDI:")
+                            and not c.startswith("B.")]
 
-            # When BD_LIST is configured, read only those BD_ columns.
-            # BD_MEDI: columns carry a numeric Dexter suffix (e.g. BD_MEDI:COND:1);
-            # match against the stripped name (BD_MEDI:COND) as well as the raw name.
             if bd_filter is not None:
-                _bd_cols_to_read = [
-                    c for c in _bd_cols_raw
-                    if c in bd_filter or sub(r":\d+$", "", c) in bd_filter
-                ]
+                def _bd_matches(col: str) -> bool:
+                    # Exact match (BD_LIST contains literal raw or post-rename name)
+                    if col in bd_filter:
+                        return True
+                    stripped = sub(r":\d+$", "", col)   # strip Dexter numeric suffix
+                    if stripped in bd_filter:
+                        return True
+                    # Flexible match: BD_LIST uses "BD_CONDNAME" but column is
+                    # "BD_MEDI:SOURCE_CONDNAME:N" (e.g. "BD_MEDI:CPRD_ACTINIC_KERATOSIS:168").
+                    # Extract the body after "BD_MEDI:" then check whether any BD_LIST
+                    # entry's condition name (stripped of "BD_" prefix) is a suffix of it.
+                    col_body = sub(r"^BD_MEDI:", "", stripped)  # e.g. "CPRD_ACTINIC_KERATOSIS"
+                    for entry in bd_filter:
+                        cond = entry[3:] if entry.startswith("BD_") else entry
+                        # Normalize underscores: Aurum columns drop underscores from
+                        # condition names (ACTINICKERATOSIS vs ACTINIC_KERATOSIS).
+                        if cond and col_body.replace("_", "").endswith(cond.replace("_", "")):
+                            return True
+                    return False
+
+                _bd_cols_to_read = [c for c in _bd_cols_raw if _bd_matches(c)]
+
+                if not _bd_cols_to_read:
+                    # Naming convention mismatch — include all BD_ columns rather
+                    # than silently producing a parquet with no condition columns.
+                    logger.warning(
+                        "BD_LIST filter matched 0 BD_ columns; "
+                        "including all BD_ columns. Check that BD_LIST names "
+                        "match the condition identifiers in the CSV."
+                    )
+                    _bd_cols_to_read = _bd_cols_raw
+
                 logger.info(
                     f"  BD_ column selection: {len(_bd_cols_to_read)} of "
                     f"{len(_bd_cols_raw)} columns selected via BD_LIST"
@@ -86,52 +220,70 @@ def preprocessing(
                 _bd_cols_to_read = _bd_cols_raw
 
             _cols_to_read = _non_bd_cols + _bd_cols_to_read
-            dat = pl.scan_csv(
-                f"{dir_data}{file_}",
-                infer_schema_length=0,
-                columns=_cols_to_read,
-            )
-            col_names_for_nulls = _cols_to_read  # all read as String with infer_schema_length=0
             file_root_ = file_[:-4]
+
+            change_colnames = {k: sub(r":\d+$", "", k)
+                               for k in _cols_to_read if k.startswith("BD_MEDI:")}
+            seen: set = set()
+            cols_to_keep = []
+            for col_name in _cols_to_read:
+                renamed = change_colnames.get(col_name, col_name)
+                if renamed not in seen:
+                    seen.add(renamed)
+                    cols_to_keep.append(col_name)
+            change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+
+            _checkpoint(
+                f"formNulls: streaming CSV '{file_}' via PyArrow "
+                f"({len(cols_to_keep)} cols: {len(_non_bd_cols)} cohort/demo + "
+                f"{len(_bd_cols_to_read)} BD_)",
+                logger,
+            )
+            _formNulls_csv_to_parquet(
+                in_path=f"{dir_data}{file_}",
+                out_path=f"{dir_data}{file_root_}_formNulls.parquet",
+                include_columns=cols_to_keep,
+                rename_map=change_colnames_kept,
+                logger=logger,
+            )
+            _checkpoint("formNulls: CSV→parquet complete", logger)
+            _free_memory()
+            _checkpoint("formNulls: memory released", logger)
 
         elif file_[-7:] == "parquet":
             dat = pl.scan_parquet(f"{dir_data}{file_}")
             col_names_for_nulls = dat.collect_schema().names()
             file_root_ = file_[:-8]
+
+            dat = dat.with_columns([
+                pl.when(pl.col(c) == "")
+                  .then(pl.lit(None, dtype=pl.String))
+                  .otherwise(pl.col(c))
+                  .alias(c)
+                for c in col_names_for_nulls
+            ])
+
+            change_colnames = {k: sub(r":\d+$", "", k)
+                               for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
+            seen: set = set()
+            cols_to_keep = []
+            for col_name in col_names_for_nulls:
+                renamed = change_colnames.get(col_name, col_name)
+                if renamed not in seen:
+                    seen.add(renamed)
+                    cols_to_keep.append(col_name)
+            change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+            dat = dat.select(cols_to_keep).rename(change_colnames_kept)
+
+            _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
+            dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet", row_group_size=100_000)
+            _checkpoint("formNulls: sink_parquet complete", logger)
+            del dat
+            _free_memory()
+            _checkpoint("formNulls: memory released", logger)
         else:
             raise Exception("File type not recognised")
-
-        # Replace empty strings with null using explicit per-column expressions.
-        # pl.all() inside when/then/otherwise is not guaranteed to be streamable
-        # in Polars and can cause a silent full-collect fallback, loading the
-        # entire dataset into RAM.  Explicit named columns avoid this.
-        dat = dat.with_columns([
-            pl.when(pl.col(c) == "")
-              .then(pl.lit(None, dtype=pl.String))
-              .otherwise(pl.col(c))
-              .alias(c)
-            for c in col_names_for_nulls
-        ])
-
-        # rm numeric suffix from Dexter out (assumes unique codelist names)
-        change_colnames = {k: sub(r":\d+$", "", k)
-                           for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
-
-        # Drop columns that would become duplicates after renaming (keep first occurrence)
-        seen: set = set()
-        cols_to_keep = []
-        for col_name in col_names_for_nulls:
-            renamed = change_colnames.get(col_name, col_name)
-            if renamed not in seen:
-                seen.add(renamed)
-                cols_to_keep.append(col_name)
-
-        change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
-        dat = dat.select(cols_to_keep).rename(change_colnames_kept)
-
-        dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet")
     logger.info("    Formatting null values finished")
-    del dat
 
     ###LinkingAurumGold############################################################
     if config_preproc["filename"] is None:
@@ -260,6 +412,7 @@ def preprocessing(
         logger.info("    Linking IMD finished")
 
     os.rename(f"{dir_data}{outFile}", f"{dir_data}dat_processed.parquet")
+    _checkpoint("dat_processed.parquet written", logger)
 
     ###DerivedColumns##############################################################
     derived_cfg = config_preproc.get("derived_columns") or {}
@@ -281,6 +434,7 @@ def preprocessing(
         logger.info("    Deriving extra columns finished")
 
     ###CreateBatchFiles############################################################
+    _checkpoint("create_batch_files check", logger)
     if config_incprev is not None and config_incprev.get("create_batch_files"):
         logger.info("Creating per-batch parquet files")
         print("Creating per-batch parquet files (column-wise batching)")
@@ -308,6 +462,7 @@ def preprocessing(
             config_incprev.get("col_end_date", "END_DATE"),
         ]
 
+        _checkpoint(f"create_batch_parquet_files: {len(bd_list)} conditions, batch_size={config_incprev.get('batch_size', 10)}", logger)
         create_batch_parquet_files(
             in_path=processed_path,
             out_dir=dir_data,
@@ -316,4 +471,5 @@ def preprocessing(
             core_cols=core_cols,
             demo_cols=demo_cols,
         )
+        _checkpoint("create_batch_parquet_files complete", logger)
         logger.info("    Creating per-batch parquet files finished")
