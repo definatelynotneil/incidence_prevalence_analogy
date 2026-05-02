@@ -58,6 +58,48 @@ def _free_memory() -> None:
             pass
 
 
+def _formNulls_csv_to_parquet(
+    in_path: str,
+    out_path: str,
+    include_columns: list,
+    rename_map: dict,
+    logger,
+    block_mb: int = 128,
+) -> None:
+    """Stream a wide CSV → parquet using PyArrow's block-wise CSV reader.
+
+    PyArrow's C++ reader skips parsing columns absent from include_columns,
+    so peak memory is proportional to the selected columns only — not the
+    full width of the CSV. Polars' scan_csv streaming can silently fall back
+    to a full collect for certain query plans, causing the entire file to be
+    materialised; this function avoids that path entirely.
+
+    block_mb: raw CSV bytes read per batch. Peak RSS per batch ≈
+    block_mb × (n_selected / n_total) × parse overhead.
+    """
+    import pyarrow as pa
+    import pyarrow.csv as pa_csv
+    import pyarrow.parquet as pq
+
+    final_names = [rename_map.get(c, c) for c in include_columns]
+    schema = pa.schema([(name, pa.string()) for name in final_names])
+
+    convert_opts = pa_csv.ConvertOptions(
+        include_columns=include_columns,
+        null_values=[""],
+        strings_can_be_null=True,
+        column_types={c: pa.string() for c in include_columns},
+    )
+    read_opts = pa_csv.ReadOptions(block_size=block_mb * 1024 * 1024)
+
+    reader = pa_csv.open_csv(in_path, read_options=read_opts, convert_options=convert_opts)
+    with pq.ParquetWriter(out_path, schema) as writer:
+        for batch in reader:
+            writer.write_batch(batch.rename_columns(final_names))
+
+    logger.info(f"  _formNulls_csv_to_parquet: wrote {out_path} ({len(include_columns)} cols)")
+
+
 def preprocessing(
         dir_data: str,
         config_preproc: dict,
@@ -178,53 +220,69 @@ def preprocessing(
                 _bd_cols_to_read = _bd_cols_raw
 
             _cols_to_read = _non_bd_cols + _bd_cols_to_read
+            file_root_ = file_[:-4]
+
+            change_colnames = {k: sub(r":\d+$", "", k)
+                               for k in _cols_to_read if k.startswith("BD_MEDI:")}
+            seen: set = set()
+            cols_to_keep = []
+            for col_name in _cols_to_read:
+                renamed = change_colnames.get(col_name, col_name)
+                if renamed not in seen:
+                    seen.add(renamed)
+                    cols_to_keep.append(col_name)
+            change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+
             _checkpoint(
-                f"formNulls: scanning CSV '{file_}' "
-                f"({len(_cols_to_read)} cols: {len(_non_bd_cols)} cohort/demo + "
+                f"formNulls: streaming CSV '{file_}' via PyArrow "
+                f"({len(cols_to_keep)} cols: {len(_non_bd_cols)} cohort/demo + "
                 f"{len(_bd_cols_to_read)} BD_)",
                 logger,
             )
-            dat = pl.scan_csv(
-                f"{dir_data}{file_}",
-                infer_schema_length=0,
-                low_memory=True,
-            ).select(_cols_to_read)
-            col_names_for_nulls = _cols_to_read
-            file_root_ = file_[:-4]
+            _formNulls_csv_to_parquet(
+                in_path=f"{dir_data}{file_}",
+                out_path=f"{dir_data}{file_root_}_formNulls.parquet",
+                include_columns=cols_to_keep,
+                rename_map=change_colnames_kept,
+                logger=logger,
+            )
+            _checkpoint("formNulls: CSV→parquet complete", logger)
+            _free_memory()
+            _checkpoint("formNulls: memory released", logger)
 
         elif file_[-7:] == "parquet":
             dat = pl.scan_parquet(f"{dir_data}{file_}")
             col_names_for_nulls = dat.collect_schema().names()
             file_root_ = file_[:-8]
+
+            dat = dat.with_columns([
+                pl.when(pl.col(c) == "")
+                  .then(pl.lit(None, dtype=pl.String))
+                  .otherwise(pl.col(c))
+                  .alias(c)
+                for c in col_names_for_nulls
+            ])
+
+            change_colnames = {k: sub(r":\d+$", "", k)
+                               for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
+            seen: set = set()
+            cols_to_keep = []
+            for col_name in col_names_for_nulls:
+                renamed = change_colnames.get(col_name, col_name)
+                if renamed not in seen:
+                    seen.add(renamed)
+                    cols_to_keep.append(col_name)
+            change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
+            dat = dat.select(cols_to_keep).rename(change_colnames_kept)
+
+            _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
+            dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet", row_group_size=100_000)
+            _checkpoint("formNulls: sink_parquet complete", logger)
+            del dat
+            _free_memory()
+            _checkpoint("formNulls: memory released", logger)
         else:
             raise Exception("File type not recognised")
-
-        dat = dat.with_columns([
-            pl.when(pl.col(c) == "")
-              .then(pl.lit(None, dtype=pl.String))
-              .otherwise(pl.col(c))
-              .alias(c)
-            for c in col_names_for_nulls
-        ])
-
-        change_colnames = {k: sub(r":\d+$", "", k)
-                           for k in col_names_for_nulls if k.startswith("BD_MEDI:")}
-        seen: set = set()
-        cols_to_keep = []
-        for col_name in col_names_for_nulls:
-            renamed = change_colnames.get(col_name, col_name)
-            if renamed not in seen:
-                seen.add(renamed)
-                cols_to_keep.append(col_name)
-        change_colnames_kept = {k: v for k, v in change_colnames.items() if k in cols_to_keep}
-        dat = dat.select(cols_to_keep).rename(change_colnames_kept)
-
-        _checkpoint(f"formNulls: starting sink_parquet → {file_root_}_formNulls.parquet", logger)
-        dat.sink_parquet(f"{dir_data}{file_root_}_formNulls.parquet", row_group_size=100_000)
-        _checkpoint("formNulls: sink_parquet complete", logger)
-        del dat
-        _free_memory()
-        _checkpoint("formNulls: memory released", logger)
     logger.info("    Formatting null values finished")
 
     ###LinkingAurumGold############################################################
