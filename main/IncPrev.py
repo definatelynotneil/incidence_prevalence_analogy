@@ -3,11 +3,51 @@ import datetime
 import csv
 from itertools import repeat
 import multiprocessing as mp
-from re import match, compile
+from re import match, compile, sub
 from typing import Optional
 import pyarrow.dataset as ds
 import polars as pl
 from main.ANALOGY_SCIENTIFIC.IncPrevMethods_polars import IncPrev
+
+
+def _resolve_bd_list(bd_list: list, filename: str) -> list:
+    """Map BD_LIST friendly names to actual column names in the data file.
+
+    Config entries like "BD_ACTINIC_KERATOSIS" need to match actual column
+    names like "BD_MEDI:CPRD_ACTINIC_KERATOSIS" that come out of preprocessing.
+    Uses the same normalisation as the preprocessing BD_LIST filter:
+    strip the BD_MEDI: source prefix, strip the Dexter :N numeric suffix,
+    and compare without underscores so that Gold-style "ACTINIC_KERATOSIS"
+    and Aurum-style "ACTINICKERATOSIS" both resolve correctly.
+    """
+    if filename.endswith(".parquet"):
+        actual_bd = [c for c in ds.dataset(filename, format="parquet").schema.names
+                     if c.startswith("BD_")]
+    elif filename.endswith(".csv"):
+        with open(filename, "r", encoding="utf8") as _f:
+            actual_bd = [c.strip() for c in next(csv.reader(_f))
+                         if c.strip().startswith("BD_")]
+    else:
+        return bd_list
+
+    resolved = []
+    for entry in bd_list:
+        if entry in actual_bd:
+            resolved.append(entry)
+            continue
+        cond = entry[3:] if entry.startswith("BD_") else entry  # strip "BD_" prefix
+        hit = next(
+            (col for col in actual_bd
+             if sub(r"^BD_MEDI:", "", sub(r":\d+$", "", col))
+                .replace("_", "")
+                .endswith(cond.replace("_", ""))),
+            None,
+        )
+        if hit:
+            resolved.append(hit)
+        else:
+            resolved.append(entry)  # keep original; will surface a clear error later
+    return resolved
 
 
 def processBatch(
@@ -107,7 +147,9 @@ def run_incprev(conf_incprev: dict,
             raise Exception("Cannot determine file type from extension")
         BASELINE_DATE_LIST = [c for c in col_head if c.startswith("BD_")]
     else:
-        BASELINE_DATE_LIST = list(conf_incprev["BD_LIST"])
+        BASELINE_DATE_LIST = _resolve_bd_list(
+            list(conf_incprev["BD_LIST"]), FULL_FILENAME
+        )
 
     batch_size = conf_incprev["batch_size"]
 
