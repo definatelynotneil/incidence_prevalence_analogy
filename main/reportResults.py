@@ -51,7 +51,8 @@ def report_results(
             try:
                 data_prev = pl.read_csv(f"{dir_}{file_prev}", infer_schema_length=0,)
                 data_inc = pl.read_csv(f"{dir_}{file_inc}", infer_schema_length=0,)
-            except:
+            except Exception as e:
+                print(f"Warning: could not read {file_prev} or {file_inc} from {dir_}: {e}")
                 continue
 
             for dat_, incprev in [(data_prev, "prev"), (data_inc, "inc")]:

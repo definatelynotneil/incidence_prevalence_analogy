@@ -66,8 +66,7 @@ class IncPrev():
         'STUDY_END_DATE', 'STUDY_START_DATE', \
         'BASELINE_DATE_LIST', 'DEMOGRAPHY', 'FILENAME', 'raw_data', \
         "date_fmt", "verbose", "DataKeys", "StudyDesignKeys", \
-        "increment_years", "increment_months", "increment_days", \
-        "BASELINE_DATE_LIST"
+        "increment_years", "increment_months", "increment_days"
 
     def __init__(self,
                  STUDY_END_DATE: datetime,

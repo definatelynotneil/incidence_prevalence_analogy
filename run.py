@@ -34,13 +34,12 @@ if opt == "process":
 ## IncPrev
 if opt == "incprev":
     from main.IncPrev import run_incprev
-    if __name__ == "__main__":
-        run_incprev(
-                config["incprev"],
-                config["dir_data"],
-                config["dir_out"],
-                config["date_fmt"],
-                )
+    run_incprev(
+            config["incprev"],
+            config["dir_data"],
+            config["dir_out"],
+            config["date_fmt"],
+            )
 
 
 ## Standardising
