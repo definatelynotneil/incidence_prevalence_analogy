@@ -274,24 +274,22 @@ class IncPrev():
             })
 
         df = pl.DataFrame(rows)
-        df = df.filter(pl.col("Denominator") > 0)
-        if df.is_empty():
-            return pl.DataFrame(schema={
-                "Condition": pl.Utf8, "Group": pl.Utf8, "Subgroup": pl.Utf8,
-                "Date": pl.Utf8, "Numerator": pl.Float64, "Denominator": pl.Float64,
-                col_name: pl.Float64, "Lower_CI": pl.Float64, "Upper_CI": pl.Float64,
-            })
         df = df.with_columns(
-            ((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY).alias(col_name),
+            pl.when(pl.col("Denominator") > 0)
+            .then((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY)
+            .otherwise(None)
+            .alias(col_name),
             pl.struct(["Numerator", "Denominator"])
             .map_elements(
-                lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY
+                if x["Denominator"] > 0 else None,
                 return_dtype=pl.Float64,
             )
             .alias("Lower_CI"),
             pl.struct(["Numerator", "Denominator"])
             .map_elements(
-                lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY
+                if x["Denominator"] > 0 else None,
                 return_dtype=pl.Float64,
             )
             .alias("Upper_CI"),
@@ -744,15 +742,19 @@ class IncPrev():
         final_den_df = pl.concat(all_den_results, how="vertical").collect()
 
         df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
-        df_overall = df_overall.filter(pl.col("Denominator") > 0)
         col_name = "Incidence" if is_incidence else "Prevalence"
         df_overall = df_overall.with_columns(
-            ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
+            pl.when(pl.col("Denominator") > 0)
+            .then((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY)
+            .otherwise(None)
+            .alias(col_name),
             pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
+            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY
+                          if x["Denominator"] > 0 else None, return_dtype=pl.Float64,)
             .alias("Lower_CI"),
             pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
+            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY
+                          if x["Denominator"] > 0 else None, return_dtype=pl.Float64,)
             .alias("Upper_CI"),
         )
 
@@ -854,15 +856,19 @@ class IncPrev():
         final_den_df = pl.concat(all_den_results, how="vertical").collect()
 
         df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
-        df_overall = df_overall.filter(pl.col("Denominator") > 0)
         col_name = "Incidence" if is_incidence else "Prevalence"
         df_overall = df_overall.with_columns(
-            ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
+            pl.when(pl.col("Denominator") > 0)
+            .then((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY)
+            .otherwise(None)
+            .alias(col_name),
             pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
+            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY
+                          if x["Denominator"] > 0 else None, return_dtype=pl.Float64,)
             .alias("Lower_CI"),
             pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
+            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY
+                          if x["Denominator"] > 0 else None, return_dtype=pl.Float64,)
             .alias("Upper_CI"),
         )
 
