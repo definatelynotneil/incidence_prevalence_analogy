@@ -8,7 +8,7 @@
 dir_data: !!str "data/"
 dir_out: !!str "out/"
 
-date_fmt: !!str "%d-%m-%Y"
+date_fmt: !!str "%Y-%m-%d"
 
 processing:
   filename: !!str "data_test.csv" #raw/unprocessed
