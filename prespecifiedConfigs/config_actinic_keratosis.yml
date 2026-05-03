@@ -14,6 +14,11 @@
 #   which is unlikely across 5 quintiles × many regions. Add it to
 #   standard_breakdowns only if cell sizes allow.
 #
+# TODO: Add a pipeline_id field to each config so that dat_processed.parquet
+#   and all out/ outputs receive a unique name when multiple pipelines share
+#   the same codebase (e.g. dat_processed_actinic_keratosis.parquet).
+#   This prevents pipelines from overwriting each other's intermediate files.
+#
 # Usage:
 #   python run.py process  --config "Pre-specified configs/config_actinic_keratosis.yml"
 #   python run.py incprev  --config "Pre-specified configs/config_actinic_keratosis.yml"
@@ -31,7 +36,7 @@
 dir_data: !!str "data/"
 dir_out:  !!str "out/actinic_keratosis/"   # separate output directory
 
-date_fmt: !!str "%d-%m-%Y"
+date_fmt: !!str "%Y-%m-%d"
 
 processing:
   filename: !!str "data_test.csv"   # ← raw input file (same as main config)
