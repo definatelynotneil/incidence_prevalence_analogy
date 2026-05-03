@@ -198,10 +198,8 @@ def run_incprev(conf_incprev: dict,
         for batch_ in batches:
             processBatch(*batch_)
     else:
-        pool = mp.get_context("spawn").Pool(processes=N_PROCESSES)
-        pool.starmap(processBatch, batches)
-        pool.close()
-        pool.join()
+        with mp.get_context("spawn").Pool(processes=N_PROCESSES) as pool:
+            pool.starmap(processBatch, batches)
 
     # Concatenate per-batch output files into final CSVs
     files_out = os.listdir(dir_out)

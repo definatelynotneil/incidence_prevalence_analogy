@@ -88,7 +88,7 @@ class StrdIncPrev():
             dtypes['Numerator'] = 'float64'
 
         else:
-            raise 'Invalid measure of burden of disease'
+            raise ValueError('Invalid measure of burden of disease')
 
         stand_subgroup_file = self.standard_breakdowns[standard_breakdown]
 
@@ -302,7 +302,7 @@ class StrdIncPrev():
         elif measure == "Incidence":
             denom_col = "PersonYears"
         else:
-            raise("Invalid metric")
+            raise ValueError("Invalid metric")
 
         wi_map = self.ref_standardDenom.Count.to_dict() #wi of each age-sex catg in df_year
 

@@ -392,7 +392,7 @@ def mergeCols(
                        f"{path_dat}{outFile}",)
                 remove(f"{path_dat}condMerged_newCol.parquet")
 
-                q1 = scan_parquet(f"{path_dat}condMerged.parquet")#, infer_schema_length=0)
+                q1 = scan_parquet(f"{path_dat}{outFile}")
             else:
                 del dict_merge[out_col] #prevents deleting of unmerged cols
                 gc.collect()
