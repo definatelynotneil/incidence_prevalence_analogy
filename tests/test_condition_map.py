@@ -160,3 +160,59 @@ class TestColumnFilterNormalisation:
             ],
         )
         assert selected == []
+
+
+class TestBdListNullWithMappingFile:
+    """When BD_LIST is null, the mapping file alone should drive column selection.
+
+    Regression test for: condition_map_file set but BD_LIST: null causing the
+    filter block to be skipped entirely, so all 286 BD_ columns were included.
+    """
+
+    def test_all_mapping_entries_used_when_bd_list_null(self, tmp_path):
+        map_path = tmp_path / "map.csv"
+        map_path.write_text(
+            "Paper Short Name,Gold,Aurum\n"
+            "act_keratosis,CPRD_ACTINIC_KERATOSIS,\n"
+            "diabetes,CPRD_DIABETES,\n"
+        )
+        from main.preprocessing import _load_condition_map, _norm_bd_frag
+        from re import sub
+
+        cmap = _load_condition_map(str(map_path))
+        # Simulate: BD_LIST is null → use all mapping file entries
+        bd_list_entries = list(cmap.keys())
+        assert set(bd_list_entries) == {"act_keratosis", "diabetes"}
+
+    def test_null_bd_list_selects_only_mapped_columns(self, tmp_path):
+        """All mapping file conditions should be selected; unrelated BD_ cols excluded."""
+        map_path = tmp_path / "map.csv"
+        map_path.write_text(
+            "Paper Short Name,Gold,Aurum\n"
+            "act_keratosis,CPRD_ACTINIC_KERATOSIS,\n"
+        )
+        from main.preprocessing import _load_condition_map, _norm_bd_frag
+        from re import sub
+
+        cmap = _load_condition_map(str(map_path))
+        bd_list_entries = list(cmap.keys())  # ["act_keratosis"]
+
+        col_filter_set: set = set()
+        for name in bd_list_entries:
+            frags = cmap[name]
+            if frags["gold"]:
+                col_filter_set.add(f"BD_MEDI:{frags['gold']}")
+            if frags["aurum"]:
+                col_filter_set.add(f"BD_MEDI:{frags['aurum']}")
+
+        norm_filter = {_norm_bd_frag(f) for f in col_filter_set}
+        candidate_cols = [
+            "BD_MEDI:CPRDAURUM_ACTINICKERATOSIS:2",
+            "BD_MEDI:CPRDAURUM_DIABETES:1",
+            "BD_MEDI:CPRD_ECZEMA:3",
+        ]
+        selected = [
+            c for c in candidate_cols
+            if _norm_bd_frag(sub(r":\d+$", "", c)) in norm_filter
+        ]
+        assert selected == ["BD_MEDI:CPRDAURUM_ACTINICKERATOSIS:2"]

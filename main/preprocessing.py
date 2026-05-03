@@ -180,38 +180,48 @@ def preprocessing(
     _use_exact_filter: bool = False
     output_names: dict | None = None   # {norm_key → Paper Short Name} for coalesce step
 
-    if config_incprev and config_incprev.get("BD_LIST"):
-        bd_list_entries = [str(b) for b in config_incprev["BD_LIST"]]
-
-        cmap_file = config_preproc.get("condition_map_file")
-        if cmap_file:
-            cmap = _load_condition_map(f"{dir_data}{cmap_file}")
-            col_filter_set: set = set()
-            output_names = {}
-            for name in bd_list_entries:
-                if name not in cmap:
-                    logger.warning(
-                        f"BD_LIST entry '{name}' not found in condition_map_file; skipping"
-                    )
-                    continue
-                frags = cmap[name]
-                gold_frag = frags["gold"]
-                aurum_frag = frags["aurum"]
-                if gold_frag:
-                    col_filter_set.add(f"BD_MEDI:{gold_frag}")
-                    # norm_key derived from Gold fragment to match coalesce_bd_source_cols
-                    _body = sub(r"^CPRD_", "", gold_frag)
-                    output_names[_body.replace("_", "").upper()] = name
-                elif aurum_frag:
-                    _body = sub(r"^CPRDAURUM_", "", aurum_frag)
-                    output_names[_body.replace("_", "").upper()] = name
-                if aurum_frag:
-                    col_filter_set.add(f"BD_MEDI:{aurum_frag}")
-            bd_filter = col_filter_set or None
-            _use_exact_filter = True
+    cmap_file = config_preproc.get("condition_map_file")
+    if cmap_file:
+        # Mapping file is the authoritative source of conditions.  BD_LIST, when
+        # present, restricts to a named subset; when absent every row in the
+        # mapping file is used.
+        cmap = _load_condition_map(f"{dir_data}{cmap_file}")
+        bd_list_raw = config_incprev.get("BD_LIST") if config_incprev else None
+        if bd_list_raw:
+            bd_list_entries = [str(b) for b in bd_list_raw]
         else:
-            bd_filter = set(bd_list_entries)
-            _use_exact_filter = False
+            bd_list_entries = list(cmap.keys())
+            logger.info(
+                f"condition_map_file set and BD_LIST is null: "
+                f"using all {len(bd_list_entries)} entries from mapping file"
+            )
+        col_filter_set: set = set()
+        output_names = {}
+        for name in bd_list_entries:
+            if name not in cmap:
+                logger.warning(
+                    f"BD_LIST entry '{name}' not found in condition_map_file; skipping"
+                )
+                continue
+            frags = cmap[name]
+            gold_frag = frags["gold"]
+            aurum_frag = frags["aurum"]
+            if gold_frag:
+                col_filter_set.add(f"BD_MEDI:{gold_frag}")
+                # norm_key derived from Gold fragment to match coalesce_bd_source_cols
+                _body = sub(r"^CPRD_", "", gold_frag)
+                output_names[_body.replace("_", "").upper()] = name
+            elif aurum_frag:
+                _body = sub(r"^CPRDAURUM_", "", aurum_frag)
+                output_names[_body.replace("_", "").upper()] = name
+            if aurum_frag:
+                col_filter_set.add(f"BD_MEDI:{aurum_frag}")
+        bd_filter = col_filter_set or None
+        _use_exact_filter = True
+    elif config_incprev and config_incprev.get("BD_LIST"):
+        bd_list_entries = [str(b) for b in config_incprev["BD_LIST"]]
+        bd_filter = set(bd_list_entries)
+        _use_exact_filter = False
 
     if config_preproc["filename"] in (None, "null", ""):
         config_preproc["filename"] = None
