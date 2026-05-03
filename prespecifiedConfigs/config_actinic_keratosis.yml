@@ -24,8 +24,9 @@
 #
 # NOTE on `process`:
 #   The process stage writes a single shared dat_processed.parquet in dir_data.
-#   No derived columns are needed for this condition group, so process only
-#   needs re-running if the raw data has changed.
+#   It derives IMD_QUINTILE from IMD_DECILE (enabled: true above), so process
+#   must be re-run if the raw data changes or if dat_processed.parquet was
+#   generated before this derivation was enabled.
 
 dir_data: !!str "data/"
 dir_out:  !!str "out/actinic_keratosis/"   # separate output directory
@@ -58,7 +59,7 @@ processing:
 
   derived_columns:
     imd_quintile:
-      enabled: !!bool False   # not needed for this condition group
+      enabled: !!bool True
       source_col: !!str "IMD_DECILE"
       output_col: !!str "IMD_QUINTILE"
       quintile_labels:
