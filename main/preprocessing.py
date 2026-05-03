@@ -100,10 +100,26 @@ def _formNulls_csv_to_parquet(
     logger.info(f"  _formNulls_csv_to_parquet: wrote {out_path} ({len(include_columns)} cols)")
 
 
+def _norm_bd_frag(col: str) -> str:
+    """Normalise a BD_ column name or fragment for cross-source comparison.
+
+    Strips BD_MEDI: prefix, CPRDAURUM_ and CPRD_ source sub-prefixes,
+    removes underscores, and uppercases so that Gold fragments
+    (e.g. "CPRD_ACTINIC_KERATOSIS") and Aurum-format column names
+    (e.g. "BD_MEDI:CPRDAURUM_ACTINICKERATOSIS") compare equal.
+    """
+    body = sub(r"^BD_MEDI:CPRDAURUM_", "", col)
+    body = sub(r"^BD_MEDI:CPRD_", "", body)
+    body = sub(r"^BD_MEDI:", "", body)
+    body = sub(r"^CPRDAURUM_", "", body)
+    body = sub(r"^CPRD_", "", body)
+    return body.replace("_", "").upper()
+
+
 def _load_condition_map(map_path: str) -> dict:
     """Load condition mapping CSV.
 
-    Expected columns: 'Paper Short Name', 'Gold', 'Aurum'.
+    Expected columns (case-insensitive): 'Paper Short Name', 'Gold', 'Aurum'.
     'Gold' and 'Aurum' are column-name fragments (without the 'BD_MEDI:' prefix
     and without the Dexter ':N' numeric suffix).  Empty strings mean the
     condition does not exist in that source.
@@ -112,11 +128,22 @@ def _load_condition_map(map_path: str) -> dict:
     """
     result = {}
     with open(map_path, "r", newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            name = row["Paper Short Name"].strip()
+        reader = csv.DictReader(fh)
+        # Build a case-insensitive header lookup so "GOLD", "Gold", "gold" all work.
+        raw_headers = reader.fieldnames or []
+        header_map = {h.strip().lower(): h for h in raw_headers}
+
+        def _get(row: dict, canonical: str) -> str:
+            key = header_map.get(canonical.lower(), canonical)
+            return row.get(key, "").strip()
+
+        for row in reader:
+            name = _get(row, "Paper Short Name")
+            if not name:
+                continue
             result[name] = {
-                "gold": sub(r":\d+$", "", row.get("Gold", "").strip()),
-                "aurum": sub(r":\d+$", "", row.get("Aurum", "").strip()),
+                "gold": sub(r":\d+$", "", _get(row, "Gold")),
+                "aurum": sub(r":\d+$", "", _get(row, "Aurum")),
             }
     return result
 
@@ -164,38 +191,48 @@ def preprocessing(
     _use_exact_filter: bool = False
     output_names: dict | None = None   # {norm_key → Paper Short Name} for coalesce step
 
-    if config_incprev and config_incprev.get("BD_LIST"):
-        bd_list_entries = [str(b) for b in config_incprev["BD_LIST"]]
-
-        cmap_file = config_preproc.get("condition_map_file")
-        if cmap_file:
-            cmap = _load_condition_map(f"{dir_data}{cmap_file}")
-            col_filter_set: set = set()
-            output_names = {}
-            for name in bd_list_entries:
-                if name not in cmap:
-                    logger.warning(
-                        f"BD_LIST entry '{name}' not found in condition_map_file; skipping"
-                    )
-                    continue
-                frags = cmap[name]
-                gold_frag = frags["gold"]
-                aurum_frag = frags["aurum"]
-                if gold_frag:
-                    col_filter_set.add(f"BD_MEDI:{gold_frag}")
-                    # norm_key derived from Gold fragment to match coalesce_bd_source_cols
-                    _body = sub(r"^CPRD_", "", gold_frag)
-                    output_names[_body.replace("_", "").upper()] = name
-                elif aurum_frag:
-                    _body = sub(r"^CPRDAURUM_", "", aurum_frag)
-                    output_names[_body.replace("_", "").upper()] = name
-                if aurum_frag:
-                    col_filter_set.add(f"BD_MEDI:{aurum_frag}")
-            bd_filter = col_filter_set or None
-            _use_exact_filter = True
+    cmap_file = config_preproc.get("condition_map_file")
+    if cmap_file:
+        # Mapping file is the authoritative source of conditions.  BD_LIST, when
+        # present, restricts to a named subset; when absent every row in the
+        # mapping file is used.
+        cmap = _load_condition_map(f"{dir_data}{cmap_file}")
+        bd_list_raw = config_incprev.get("BD_LIST") if config_incprev else None
+        if bd_list_raw:
+            bd_list_entries = [str(b) for b in bd_list_raw]
         else:
-            bd_filter = set(bd_list_entries)
-            _use_exact_filter = False
+            bd_list_entries = list(cmap.keys())
+            logger.info(
+                f"condition_map_file set and BD_LIST is null: "
+                f"using all {len(bd_list_entries)} entries from mapping file"
+            )
+        col_filter_set: set = set()
+        output_names = {}
+        for name in bd_list_entries:
+            if name not in cmap:
+                logger.warning(
+                    f"BD_LIST entry '{name}' not found in condition_map_file; skipping"
+                )
+                continue
+            frags = cmap[name]
+            gold_frag = frags["gold"]
+            aurum_frag = frags["aurum"]
+            if gold_frag:
+                col_filter_set.add(f"BD_MEDI:{gold_frag}")
+                # norm_key derived from Gold fragment to match coalesce_bd_source_cols
+                _body = sub(r"^CPRD_", "", gold_frag)
+                output_names[_body.replace("_", "").upper()] = name
+            elif aurum_frag:
+                _body = sub(r"^CPRDAURUM_", "", aurum_frag)
+                output_names[_body.replace("_", "").upper()] = name
+            if aurum_frag:
+                col_filter_set.add(f"BD_MEDI:{aurum_frag}")
+        bd_filter = col_filter_set or None
+        _use_exact_filter = True
+    elif config_incprev and config_incprev.get("BD_LIST"):
+        bd_list_entries = [str(b) for b in config_incprev["BD_LIST"]]
+        bd_filter = set(bd_list_entries)
+        _use_exact_filter = False
 
     if config_preproc["filename"] in (None, "null", ""):
         config_preproc["filename"] = None
@@ -242,10 +279,15 @@ def preprocessing(
 
             if bd_filter is not None:
                 if _use_exact_filter:
-                    # Mapping file was used: match exactly after stripping ':N' suffix
+                    # Mapping file was used.  Normalise both the filter fragments
+                    # and the candidate column names before comparing so that Gold
+                    # fragments (e.g. "CPRD_ACTINIC_KERATOSIS") match Aurum-style
+                    # column names (e.g. "BD_MEDI:CPRDAURUM_ACTINICKERATOSIS:2")
+                    # and vice-versa.
+                    _norm_filter = {_norm_bd_frag(f) for f in bd_filter}
                     _bd_cols_to_read = [
                         c for c in _bd_cols_raw
-                        if sub(r":\d+$", "", c) in bd_filter
+                        if _norm_bd_frag(sub(r":\d+$", "", c)) in _norm_filter
                     ]
                 else:
                     # No mapping file: BD_LIST entries are direct column names.
