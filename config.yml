@@ -20,6 +20,12 @@ processing:
   map_file_AtoB: !!str "VisionToEmisMigrators.txt"
   map_delim_AtoB: !!str "\t"
 
+  # Condition mapping CSV with columns 'Paper Short Name', 'Gold', 'Aurum'.
+  # Gold/Aurum values are column-name fragments (no 'BD_MEDI:' prefix, no ':N' suffix).
+  # When set, BD_LIST entries are Paper Short Names looked up in this file.
+  # null = BD_LIST entries are treated as direct column names (default).
+  condition_map_file: null
+
   path_hes: null
   col_patid_cprd: "PATIENT_ID"
   col_patid_hes: "patid"
