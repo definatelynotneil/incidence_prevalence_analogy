@@ -52,10 +52,13 @@ def _ratios_for_condition(df_cond: pd.DataFrame, measure: str, ratio_col: str) -
 
     ``df_cond`` is wide-form: rows = (Group, Subgroup), columns = date strings.
     """
-    overall = df_cond.loc["Overall"]  # Series: date → value
+    overall_sel = df_cond.loc["Overall"]
+    # loc on a MultiIndex returns a DataFrame when there are multiple sub-rows;
+    # we need a single Series (one value per date) for the division to broadcast correctly.
+    overall: pd.Series = overall_sel.iloc[0] if isinstance(overall_sel, pd.DataFrame) else overall_sel
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        ratios = df_cond.div(overall)  # broadcasting divides each row by overall
+        ratios = df_cond.div(overall, axis="columns")
     return pd.concat(
         [df_cond, ratios],
         axis=1,
