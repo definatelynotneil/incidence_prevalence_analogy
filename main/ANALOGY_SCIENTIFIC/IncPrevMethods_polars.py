@@ -161,7 +161,9 @@ class IncPrev():
                 )
 
 
-    def byars_lower(self, count: int, denominator: Union[float,int]) -> float:
+    def byars_lower(self, count: int, denominator: Union[float,int]) -> Optional[float]:
+        if denominator == 0:
+            return None
         if count < 10:
             b = chi2.ppf((self.ALPHA / 2), (count * 2)) / 2
             lower_ci = b / denominator
@@ -175,7 +177,9 @@ class IncPrev():
             return lower_ci
 
 
-    def byars_higher(self, count: int, denominator: Union[float,int]) -> float:
+    def byars_higher(self, count: int, denominator: Union[float,int]) -> Optional[float]:
+        if denominator == 0:
+            return None
         if count < 10:
             b = chi2.ppf(1 - (self.ALPHA / 2), 2 * count + 2) / 2
             upper_ci = b / denominator
@@ -270,6 +274,13 @@ class IncPrev():
             })
 
         df = pl.DataFrame(rows)
+        df = df.filter(pl.col("Denominator") > 0)
+        if df.is_empty():
+            return pl.DataFrame(schema={
+                "Condition": pl.Utf8, "Group": pl.Utf8, "Subgroup": pl.Utf8,
+                "Date": pl.Utf8, "Numerator": pl.Float64, "Denominator": pl.Float64,
+                col_name: pl.Float64, "Lower_CI": pl.Float64, "Upper_CI": pl.Float64,
+            })
         df = df.with_columns(
             ((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY).alias(col_name),
             pl.struct(["Numerator", "Denominator"])
@@ -733,6 +744,7 @@ class IncPrev():
         final_den_df = pl.concat(all_den_results, how="vertical").collect()
 
         df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
+        df_overall = df_overall.filter(pl.col("Denominator") > 0)
         col_name = "Incidence" if is_incidence else "Prevalence"
         df_overall = df_overall.with_columns(
             ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
@@ -842,6 +854,7 @@ class IncPrev():
         final_den_df = pl.concat(all_den_results, how="vertical").collect()
 
         df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
+        df_overall = df_overall.filter(pl.col("Denominator") > 0)
         col_name = "Incidence" if is_incidence else "Prevalence"
         df_overall = df_overall.with_columns(
             ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
