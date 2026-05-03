@@ -119,7 +119,7 @@ def _norm_bd_frag(col: str) -> str:
 def _load_condition_map(map_path: str) -> dict:
     """Load condition mapping CSV.
 
-    Expected columns: 'Paper Short Name', 'Gold', 'Aurum'.
+    Expected columns (case-insensitive): 'Paper Short Name', 'Gold', 'Aurum'.
     'Gold' and 'Aurum' are column-name fragments (without the 'BD_MEDI:' prefix
     and without the Dexter ':N' numeric suffix).  Empty strings mean the
     condition does not exist in that source.
@@ -128,11 +128,22 @@ def _load_condition_map(map_path: str) -> dict:
     """
     result = {}
     with open(map_path, "r", newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            name = row["Paper Short Name"].strip()
+        reader = csv.DictReader(fh)
+        # Build a case-insensitive header lookup so "GOLD", "Gold", "gold" all work.
+        raw_headers = reader.fieldnames or []
+        header_map = {h.strip().lower(): h for h in raw_headers}
+
+        def _get(row: dict, canonical: str) -> str:
+            key = header_map.get(canonical.lower(), canonical)
+            return row.get(key, "").strip()
+
+        for row in reader:
+            name = _get(row, "Paper Short Name")
+            if not name:
+                continue
             result[name] = {
-                "gold": sub(r":\d+$", "", row.get("Gold", "").strip()),
-                "aurum": sub(r":\d+$", "", row.get("Aurum", "").strip()),
+                "gold": sub(r":\d+$", "", _get(row, "Gold")),
+                "aurum": sub(r":\d+$", "", _get(row, "Aurum")),
             }
     return result
 

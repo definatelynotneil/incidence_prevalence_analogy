@@ -84,6 +84,28 @@ class TestLoadConditionMap:
         assert result["cond_a"]["gold"] == "CPRD_FOO"
         assert result["cond_a"]["aurum"] == "CPRDAURUM_FOO"
 
+    def test_uppercase_headers(self, tmp_path):
+        """Headers like 'GOLD' and 'AURUM' should work identically to 'Gold'/'Aurum'."""
+        path = tmp_path / "map.csv"
+        path.write_text(
+            "Paper Short Name,GOLD,AURUM\n"
+            "act_keratosis,CPRD_ACTINIC_KERATOSIS,\n"
+        )
+        result = _load_condition_map(str(path))
+        assert result["act_keratosis"]["gold"] == "CPRD_ACTINIC_KERATOSIS"
+        assert result["act_keratosis"]["aurum"] == ""
+
+    def test_mixed_case_headers(self, tmp_path):
+        """Any capitalisation of header names should be accepted."""
+        path = tmp_path / "map.csv"
+        path.write_text(
+            "paper short name,gold,aurum\n"
+            "act_keratosis,CPRD_ACTINIC_KERATOSIS,\n"
+        )
+        result = _load_condition_map(str(path))
+        assert "act_keratosis" in result
+        assert result["act_keratosis"]["gold"] == "CPRD_ACTINIC_KERATOSIS"
+
 
 class TestColumnFilterNormalisation:
     """Integration-style test for the column selection path.
