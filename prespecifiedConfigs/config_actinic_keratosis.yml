@@ -40,6 +40,10 @@ processing:
   map_file_AtoB: !!str "VisionToEmisMigrators.txt"
   map_delim_AtoB: !!str "\t"
 
+  # Condition mapping CSV (path relative to dir_data).
+  # BD_LIST entries below are 'Paper Short Name' values from this file.
+  condition_map_file: !!str "condition_mapping.csv"
+
   path_hes: null
   col_patid_cprd: "PATIENT_ID"
   col_patid_hes: "patid"
@@ -102,7 +106,7 @@ incprev:
   streaming_chunk_size: null
 
   BD_LIST:
-    - "BD_ACTINIC_KERATOSIS"   # ← replace with your exact BD_ column name
+    - "Actinic Keratosis"   # Paper Short Name from condition_mapping.csv
 
   batch_size: !!int 1
   INCREMENT_BY_MONTH: !!int 12

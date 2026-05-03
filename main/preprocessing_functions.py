@@ -578,8 +578,13 @@ def derive_columns(in_path: str, out_path: str, derived_config: dict) -> None:
     lf.sink_parquet(out_path)
 
 
-def coalesce_bd_source_cols(in_path: str, out_path: str, logger=None) -> None:
-    """Coalesce source-prefixed BD_MEDI: columns into clean BD_ columns.
+def coalesce_bd_source_cols(
+    in_path: str,
+    out_path: str,
+    logger=None,
+    output_names: dict | None = None,
+) -> None:
+    """Coalesce source-prefixed BD_MEDI: columns into one column per condition.
 
     After Gold/Aurum linking, condition columns carry source-specific prefixes:
       BD_MEDI:CPRD_ACTINIC_KERATOSIS    (Gold, underscores in name)
@@ -589,9 +594,13 @@ def coalesce_bd_source_cols(in_path: str, out_path: str, logger=None) -> None:
     Each patient has a non-null value in at most one source's column.  This
     function groups these variants by normalised condition name (underscores
     removed, uppercase), coalesces each group via pyarrow.compute.coalesce(),
-    and renames the result to a clean BD_CONDNAME column (using Gold-style
-    underscored name when a CPRD_ column exists, otherwise the bare or Aurum
-    name).
+    and names the result according to output_names when provided (Paper Short
+    Name from the condition mapping file), or falls back to deriving a
+    BD_CONDNAME from the Gold column name.
+
+    output_names maps normalised condition key → desired output column name.
+    The normalised key for a Gold fragment 'CPRD_FOO_BAR' is 'FOOBAR'
+    (strip CPRD_/CPRDAURUM_ prefix, remove underscores, uppercase).
 
     Uses PyArrow iter_batches so memory usage is bounded by batch size
     regardless of how many conditions the parquet contains.  Polars
@@ -643,10 +652,19 @@ def coalesce_bd_source_cols(in_path: str, out_path: str, logger=None) -> None:
     for col in source_bd:
         groups.setdefault(norm_key(col), []).append(col)
 
+    # Determine output column name for each group.
+    # output_names (from condition mapping) takes priority; fall back to canonical_name.
+    group_output_names: dict = {}
+    for key, cols in groups.items():
+        if output_names and key in output_names:
+            group_output_names[key] = output_names[key]
+        else:
+            group_output_names[key] = canonical_name(cols)
+
     # Build the output schema: non-source columns first, then one per group
     out_fields = [schema.field(c) for c in non_source]
-    for key, cols in groups.items():
-        out_fields.append(pa.field(canonical_name(cols), pa.string()))
+    for key in groups:
+        out_fields.append(pa.field(group_output_names[key], pa.string()))
     out_schema = pa.schema(out_fields)
 
     n_merged = sum(1 for cols in groups.values() if len(cols) > 1)
