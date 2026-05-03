@@ -4,29 +4,37 @@
 #
 # Key differences from config.yml:
 #   - BD_LIST restricted to ADHD and Autism only
-#   - IMD stratified by quintile (not decile)
+#   - IMD stratified by quintile (not decile); derived from existing IMD_DECILE
+#     column (link_imd: false — no pracid-keyed linking needed)
 #   - Additional AGE_BINARY (under 18 / 18 and over) group, with cross-tabs
 #     against IMD, ethnicity, sex — crude output only (not standardised)
 #   - Outputs written to out/adhd_autism/ (separate from main run)
 #
+# TODO: Add a pipeline_id field to each config so that dat_processed.parquet
+#   and all out/ outputs receive a unique name when multiple pipelines share
+#   the same codebase (e.g. dat_processed_adhd_autism.parquet, out/adhd_autism/).
+#   This prevents pipelines from overwriting each other's intermediate files.
+#
 # Usage:
-#   python run.py process  --config config_adhd_autism.yml   # run once; adds derived columns to dat_processed.parquet
-#   python run.py incprev  --config config_adhd_autism.yml
-#   python run.py strd     --config config_adhd_autism.yml
-#   python run.py zscore   --config config_adhd_autism.yml
-#   python run.py censor   --config config_adhd_autism.yml
-#   python run.py report   --config config_adhd_autism.yml
+#   python run.py process  --config "prespecifiedConfigs/config_adhd_autism.yml"
+#   python run.py incprev  --config "prespecifiedConfigs/config_adhd_autism.yml"
+#   python run.py strd     --config "prespecifiedConfigs/config_adhd_autism.yml"
+#   python run.py zscore   --config "prespecifiedConfigs/config_adhd_autism.yml"
+#   python run.py censor   --config "prespecifiedConfigs/config_adhd_autism.yml"
+#   python run.py report   --config "prespecifiedConfigs/config_adhd_autism.yml"
 #
 # NOTE on `process`:
 #   The process stage writes a single shared dat_processed.parquet in dir_data.
-#   If derived columns (IMD_QUINTILE, AGE_BINARY) are also needed for other
-#   condition groups, enable them in those configs too — or run process once with
-#   all derived columns enabled before running incprev for any group.
+#   It derives IMD_QUINTILE from IMD_DECILE and AGE_BINARY from AGE (both
+#   enabled: true below), so process must be re-run if the raw data changes or
+#   if dat_processed.parquet was generated before these derivations were enabled.
+#   If derived columns are also needed for other condition groups, enable them in
+#   those configs too — or run process once with all derivations enabled.
 
 dir_data: !!str "data/"
 dir_out:  !!str "out/adhd_autism/"   # separate output directory
 
-date_fmt: !!str "%d-%m-%Y"
+date_fmt: !!str "%Y-%m-%d"
 
 processing:
   filename: !!str "data_test.csv"   # ← raw input file (same as main config)
@@ -49,8 +57,8 @@ processing:
 
   combineLevels: null
 
-  link_imd: !!bool False
-  imd_map_file: !!str ".csv"
+  link_imd: !!bool False   # IMD_DECILE already present in raw data; no pracid-keyed linking needed
+  imd_map_file: null
 
   derived_columns:
     imd_quintile:

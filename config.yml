@@ -4,6 +4,11 @@
 #   |     |_filename [in config]
 #   |
 #   |_ out/
+#
+# TODO: Add a pipeline_id field to each config so that dat_processed.parquet
+#   and all out/ outputs receive a unique name when multiple pipelines share
+#   the same codebase (e.g. dat_processed_adhd_autism.parquet, out/adhd_autism/).
+#   This prevents pipelines from overwriting each other's intermediate files.
 
 dir_data: !!str "data/"
 dir_out: !!str "out/"
