@@ -54,13 +54,15 @@ processing:
 
   combineLevels: null
 
-  link_imd: !!bool False
-  imd_map_file: !!str ".csv"
+  link_imd: !!bool True
+  imd_map_file:
+    - !!str "imd_map_pracid_gold.csv"
+    - !!str "imd_map.csv"
 
   derived_columns:
     imd_quintile:
       enabled: !!bool True
-      source_col: !!str "IMD_DECILE"
+      source_col: !!str "IMD_pracid"   # column created by process_imd from pracid-keyed map files
       output_col: !!str "IMD_QUINTILE"
       quintile_labels:
         - "Q1 (most deprived)"
