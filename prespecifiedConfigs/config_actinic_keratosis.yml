@@ -4,14 +4,14 @@
 #
 # Key differences from config.yml:
 #   - BD_LIST restricted to Actinic Keratosis only
-#   - Additional (IMD_DECILE, REGION) intersection group in crude output
+#   - Additional (IMD_QUINTILE, REGION) intersection group in crude output
 #   - Outputs written to out/actinic_keratosis/ (separate from main run)
 #
-# Note on (IMD_DECILE, REGION) standardisation:
+# Note on (IMD_QUINTILE, REGION) standardisation:
 #   This intersection is included in DEMOGRAPHY for crude output but is NOT
 #   listed in strd.standard_breakdowns. Standardising within each IMD × Region
 #   cell requires sufficient patient numbers in every age-sex stratum per cell,
-#   which is unlikely across 10 deciles × many regions. Add it to
+#   which is unlikely across 5 quintiles × many regions. Add it to
 #   standard_breakdowns only if cell sizes allow.
 #
 # Usage:
@@ -116,17 +116,17 @@ incprev:
     # --- Standalone stratifiers ---
     - "AGE_CATEGORY"
     - "SEX"
-    - "IMD_DECILE"
+    - "IMD_QUINTILE"
     - "REGION"          # ← replace with your region column name if different
 
-    # --- (IMD_DECILE, REGION) intersection: crude only ---
+    # --- (IMD_QUINTILE, REGION) intersection: crude only ---
     # See note at top of file regarding standardisation of this group.
-    - ["IMD_DECILE", "REGION"]
+    - ["IMD_QUINTILE", "REGION"]
 
     # --- Composite groups required for standardisation ---
-    - ["AGE_CATEGORY", "SEX"]                  # → Overall DSR
-    - ["AGE_CATEGORY", "SEX", "IMD_DECILE"]    # → DSR per IMD decile
-    - ["AGE_CATEGORY", "SEX", "REGION"]        # → DSR per region
+    - ["AGE_CATEGORY", "SEX"]                   # → Overall DSR
+    - ["AGE_CATEGORY", "SEX", "IMD_QUINTILE"]   # → DSR per IMD quintile
+    - ["AGE_CATEGORY", "SEX", "REGION"]         # → DSR per region
 
 strd:
   reference_population: "UK Age-Sex Pop Structure.csv"
@@ -134,15 +134,15 @@ strd:
   age_group_labels: ['0-16', '17-30', '31-40', '41-50', '51-60', '61-70', '71-80', '81+']
 
   standard_breakdowns:   # must include 'Overall'; label keys are arbitrary
-    Overall:    "AGE_CATEGORY, SEX"
-    imd_decile: "AGE_CATEGORY, SEX, IMD_DECILE"
-    region:     "AGE_CATEGORY, SEX, REGION"
-    # (IMD_DECILE, REGION) intersection deliberately absent → crude only
+    Overall:      "AGE_CATEGORY, SEX"
+    imd_quintile: "AGE_CATEGORY, SEX, IMD_QUINTILE"
+    region:       "AGE_CATEGORY, SEX, REGION"
+    # (IMD_QUINTILE, REGION) intersection deliberately absent → crude only
 
 zscore:
   alpha: !!float 0.05
   include_groups:
-    - "imd_decile"
+    - "imd_quintile"
     - "region"
 
 censor:
@@ -154,7 +154,7 @@ report:
   table1_catgs:
     - "AGE_CATEGORY"
     - "SEX"
-    - "IMD_DECILE"
+    - "IMD_QUINTILE"
     - "REGION"      # ← remove if not available
   table1_nums: []
 
@@ -163,16 +163,16 @@ report:
     - "Overall"
     - "AGE_CATEGORY"
     - "SEX"
-    - "IMD_DECILE"
+    - "IMD_QUINTILE"
     - "REGION"
-    # The IMD_DECILE, REGION intersection will appear in the raw crude CSV
+    # The IMD_QUINTILE, REGION intersection will appear in the raw crude CSV
     # but is not listed here for plotting (too many combinations for a chart).
     # Access it directly from inc_crude.csv / prev_crude.csv if needed.
 
   strd: True
   catgs_strd:
     - "Overall"
-    - "imd_decile"
+    - "imd_quintile"
     - "region"
 
   layout:
