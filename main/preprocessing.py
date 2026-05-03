@@ -100,6 +100,22 @@ def _formNulls_csv_to_parquet(
     logger.info(f"  _formNulls_csv_to_parquet: wrote {out_path} ({len(include_columns)} cols)")
 
 
+def _norm_bd_frag(col: str) -> str:
+    """Normalise a BD_ column name or fragment for cross-source comparison.
+
+    Strips BD_MEDI: prefix, CPRDAURUM_ and CPRD_ source sub-prefixes,
+    removes underscores, and uppercases so that Gold fragments
+    (e.g. "CPRD_ACTINIC_KERATOSIS") and Aurum-format column names
+    (e.g. "BD_MEDI:CPRDAURUM_ACTINICKERATOSIS") compare equal.
+    """
+    body = sub(r"^BD_MEDI:CPRDAURUM_", "", col)
+    body = sub(r"^BD_MEDI:CPRD_", "", body)
+    body = sub(r"^BD_MEDI:", "", body)
+    body = sub(r"^CPRDAURUM_", "", body)
+    body = sub(r"^CPRD_", "", body)
+    return body.replace("_", "").upper()
+
+
 def _load_condition_map(map_path: str) -> dict:
     """Load condition mapping CSV.
 
@@ -242,10 +258,15 @@ def preprocessing(
 
             if bd_filter is not None:
                 if _use_exact_filter:
-                    # Mapping file was used: match exactly after stripping ':N' suffix
+                    # Mapping file was used.  Normalise both the filter fragments
+                    # and the candidate column names before comparing so that Gold
+                    # fragments (e.g. "CPRD_ACTINIC_KERATOSIS") match Aurum-style
+                    # column names (e.g. "BD_MEDI:CPRDAURUM_ACTINICKERATOSIS:2")
+                    # and vice-versa.
+                    _norm_filter = {_norm_bd_frag(f) for f in bd_filter}
                     _bd_cols_to_read = [
                         c for c in _bd_cols_raw
-                        if sub(r":\d+$", "", c) in bd_filter
+                        if _norm_bd_frag(sub(r":\d+$", "", c)) in _norm_filter
                     ]
                 else:
                     # No mapping file: BD_LIST entries are direct column names.
