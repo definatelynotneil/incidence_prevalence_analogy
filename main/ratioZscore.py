@@ -52,10 +52,13 @@ def _ratios_for_condition(df_cond: pd.DataFrame, measure: str, ratio_col: str) -
 
     ``df_cond`` is wide-form: rows = (Group, Subgroup), columns = date strings.
     """
-    overall = df_cond.loc["Overall"]  # Series: date → value
+    overall_sel = df_cond.loc["Overall"]
+    # loc on a MultiIndex returns a DataFrame when there are multiple sub-rows;
+    # we need a single Series (one value per date) for the division to broadcast correctly.
+    overall: pd.Series = overall_sel.iloc[0] if isinstance(overall_sel, pd.DataFrame) else overall_sel
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        ratios = df_cond.div(overall)  # broadcasting divides each row by overall
+        ratios = df_cond.div(overall, axis="columns")
     return pd.concat(
         [df_cond, ratios],
         axis=1,
@@ -183,10 +186,10 @@ def run_ratio_zscore(config: dict) -> None:
     prev_df = _load_dsr(prev_path, "Prevalence")
     inc_df = _load_dsr(inc_path, "Incidence")
 
-    # Filter to requested groups
+    # Filter to requested groups, but always retain "Overall" rows needed for ratio calculation
     if include_groups is not None:
-        prev_df = prev_df[prev_df["Group"].isin(include_groups)]
-        inc_df = inc_df[inc_df["Group"].isin(include_groups)]
+        prev_df = prev_df[prev_df["Group"].isin(include_groups) | (prev_df["Group"] == "Overall")]
+        inc_df = inc_df[inc_df["Group"].isin(include_groups) | (inc_df["Group"] == "Overall")]
 
     # Derive analysis dates from the data
     prev_dates = sorted(prev_df["Date"].unique().tolist())
