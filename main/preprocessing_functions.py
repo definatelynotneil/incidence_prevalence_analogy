@@ -224,20 +224,22 @@ def process_imd(
     joinCol = "PRACTICE_PATIENT_ID"
     imd_dict = dict()
 
-    with open(f"{path_dir}{file_map}", "r") as f:
-        r = reader(f, delimiter=imd_delim)
-        label = next(r, None)[i_imd_key]
-        label = f"IMD_{label}"
-        imd_dict[label] = dict()
-        for line in r:
-            value = str(line[i_imd_value])
-            #Ensure all values contain no special characters
-            value = sub(r'[^\w]', '', value)
+    for fm in ([file_map] if isinstance(file_map, str) else file_map):
+        with open(f"{path_dir}{fm}", "r") as f:
+            r = reader(f, delimiter=imd_delim)
+            label = next(r, None)[i_imd_key]
+            label = f"IMD_{label}"
+            if label not in imd_dict:
+                imd_dict[label] = dict()
+            for line in r:
+                value = str(line[i_imd_value])
+                #Ensure all values contain no special characters
+                value = sub(r'[^\w]', '', value)
 
-            if label == "IMD_pracid":
-                imd_dict[label][f"p{line[i_imd_key]}"] = value
-            else:
-                imd_dict[label][f"{line[i_imd_key]}"] = str(line[i_imd_value])
+                if label == "IMD_pracid":
+                    imd_dict[label][f"p{line[i_imd_key]}"] = value
+                else:
+                    imd_dict[label][f"{line[i_imd_key]}"] = str(line[i_imd_value])
 
     if is_parquet:
         q1 = (
