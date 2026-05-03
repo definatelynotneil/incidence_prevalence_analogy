@@ -183,10 +183,10 @@ def run_ratio_zscore(config: dict) -> None:
     prev_df = _load_dsr(prev_path, "Prevalence")
     inc_df = _load_dsr(inc_path, "Incidence")
 
-    # Filter to requested groups
+    # Filter to requested groups, but always retain "Overall" rows needed for ratio calculation
     if include_groups is not None:
-        prev_df = prev_df[prev_df["Group"].isin(include_groups)]
-        inc_df = inc_df[inc_df["Group"].isin(include_groups)]
+        prev_df = prev_df[prev_df["Group"].isin(include_groups) | (prev_df["Group"] == "Overall")]
+        inc_df = inc_df[inc_df["Group"].isin(include_groups) | (inc_df["Group"] == "Overall")]
 
     # Derive analysis dates from the data
     prev_dates = sorted(prev_df["Date"].unique().tolist())
