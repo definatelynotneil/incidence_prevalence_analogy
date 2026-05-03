@@ -3,11 +3,59 @@ import datetime
 import csv
 from itertools import repeat
 import multiprocessing as mp
-from re import match, compile
+from re import match, compile, sub
 from typing import Optional
 import pyarrow.dataset as ds
 import polars as pl
 from main.ANALOGY_SCIENTIFIC.IncPrevMethods_polars import IncPrev
+
+
+def _resolve_bd_list(bd_list: list, filename: str) -> list:
+    """Map BD_LIST entries to actual column names in the data file.
+
+    Preprocessing coalesces source-prefixed columns (BD_MEDI:CPRD_*, etc.)
+    into clean BD_CONDNAME columns, so exact matches are expected for
+    well-formed BD_LIST entries.  Fuzzy matching is retained as a fallback
+    for data files that have not been through the coalescing step.
+    """
+    if filename.endswith(".parquet"):
+        actual_bd = [c for c in ds.dataset(filename, format="parquet").schema.names
+                     if c.startswith("BD_")]
+    elif filename.endswith(".csv"):
+        with open(filename, "r", encoding="utf8") as _f:
+            actual_bd = [c.strip() for c in next(csv.reader(_f))
+                         if c.strip().startswith("BD_")]
+    else:
+        return bd_list
+
+    actual_bd_set = set(actual_bd)
+    resolved = []
+    for entry in bd_list:
+        # Exact match (expected case after preprocessing coalescing)
+        if entry in actual_bd_set:
+            resolved.append(entry)
+            continue
+        # Fuzzy fallback: normalise underscores and strip BD_MEDI: source prefix
+        cond = entry[3:] if entry.startswith("BD_") else entry
+        cond_norm = cond.replace("_", "").upper()
+        # Prefer source-prefixed columns (CPRD_ etc.) over bare BD_MEDI: columns
+        # to avoid resolving to a non-existent bare name.
+        hit = next(
+            (col for col in actual_bd
+             if "CPRD" in col
+             and sub(r"^BD_MEDI:[A-Z0-9]+_", "", col)
+                .replace("_", "").upper() == cond_norm),
+            None,
+        )
+        if hit is None:
+            hit = next(
+                (col for col in actual_bd
+                 if sub(r"^BD_MEDI:", "", col)
+                    .replace("_", "").upper() == cond_norm),
+                None,
+            )
+        resolved.append(hit if hit is not None else entry)
+    return resolved
 
 
 def processBatch(
@@ -107,7 +155,9 @@ def run_incprev(conf_incprev: dict,
             raise Exception("Cannot determine file type from extension")
         BASELINE_DATE_LIST = [c for c in col_head if c.startswith("BD_")]
     else:
-        BASELINE_DATE_LIST = list(conf_incprev["BD_LIST"])
+        BASELINE_DATE_LIST = _resolve_bd_list(
+            list(conf_incprev["BD_LIST"]), FULL_FILENAME
+        )
 
     batch_size = conf_incprev["batch_size"]
 
@@ -148,10 +198,8 @@ def run_incprev(conf_incprev: dict,
         for batch_ in batches:
             processBatch(*batch_)
     else:
-        pool = mp.get_context("spawn").Pool(processes=N_PROCESSES)
-        pool.starmap(processBatch, batches)
-        pool.close()
-        pool.join()
+        with mp.get_context("spawn").Pool(processes=N_PROCESSES) as pool:
+            pool.starmap(processBatch, batches)
 
     # Concatenate per-batch output files into final CSVs
     files_out = os.listdir(dir_out)

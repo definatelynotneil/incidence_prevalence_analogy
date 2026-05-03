@@ -13,7 +13,7 @@ import resource
 
 import polars as pl
 import pyarrow.dataset as ds
-from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns
+from main.preprocessing_functions import process_imd, rmDup, mergeCols, combineLevels, link_hes, create_batch_parquet_files, derive_columns, coalesce_bd_source_cols
 
 def _mem_gb() -> str:
     """Return current RSS memory usage as a formatted string.
@@ -100,6 +100,27 @@ def _formNulls_csv_to_parquet(
     logger.info(f"  _formNulls_csv_to_parquet: wrote {out_path} ({len(include_columns)} cols)")
 
 
+def _load_condition_map(map_path: str) -> dict:
+    """Load condition mapping CSV.
+
+    Expected columns: 'Paper Short Name', 'Gold', 'Aurum'.
+    'Gold' and 'Aurum' are column-name fragments (without the 'BD_MEDI:' prefix
+    and without the Dexter ':N' numeric suffix).  Empty strings mean the
+    condition does not exist in that source.
+
+    Returns {paper_short_name: {'gold': gold_frag, 'aurum': aurum_frag}}.
+    """
+    result = {}
+    with open(map_path, "r", newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            name = row["Paper Short Name"].strip()
+            result[name] = {
+                "gold": sub(r":\d+$", "", row.get("Gold", "").strip()),
+                "aurum": sub(r":\d+$", "", row.get("Aurum", "").strip()),
+            }
+    return result
+
+
 def preprocessing(
         dir_data: str,
         config_preproc: dict,
@@ -133,9 +154,48 @@ def preprocessing(
     # Build a set of BD_ column names actually needed (from BD_LIST in incprev config).
     # When the raw CSV has hundreds of condition columns but only a few are needed,
     # reading only those columns avoids loading the entire wide file into RAM.
+    #
+    # When condition_map_file is set, BD_LIST entries are Paper Short Names looked
+    # up in the mapping CSV.  The mapping gives exact Gold/Aurum column fragments;
+    # we prepend 'BD_MEDI:' and match exactly (after stripping Dexter ':N' suffix).
+    # When no mapping file is given, BD_LIST entries are treated as direct column
+    # names and the legacy fuzzy fallback is used (backward-compatible).
     bd_filter: set | None = None
+    _use_exact_filter: bool = False
+    output_names: dict | None = None   # {norm_key → Paper Short Name} for coalesce step
+
     if config_incprev and config_incprev.get("BD_LIST"):
-        bd_filter = set(str(b) for b in config_incprev["BD_LIST"])
+        bd_list_entries = [str(b) for b in config_incprev["BD_LIST"]]
+
+        cmap_file = config_preproc.get("condition_map_file")
+        if cmap_file:
+            cmap = _load_condition_map(f"{dir_data}{cmap_file}")
+            col_filter_set: set = set()
+            output_names = {}
+            for name in bd_list_entries:
+                if name not in cmap:
+                    logger.warning(
+                        f"BD_LIST entry '{name}' not found in condition_map_file; skipping"
+                    )
+                    continue
+                frags = cmap[name]
+                gold_frag = frags["gold"]
+                aurum_frag = frags["aurum"]
+                if gold_frag:
+                    col_filter_set.add(f"BD_MEDI:{gold_frag}")
+                    # norm_key derived from Gold fragment to match coalesce_bd_source_cols
+                    _body = sub(r"^CPRD_", "", gold_frag)
+                    output_names[_body.replace("_", "").upper()] = name
+                elif aurum_frag:
+                    _body = sub(r"^CPRDAURUM_", "", aurum_frag)
+                    output_names[_body.replace("_", "").upper()] = name
+                if aurum_frag:
+                    col_filter_set.add(f"BD_MEDI:{aurum_frag}")
+            bd_filter = col_filter_set or None
+            _use_exact_filter = True
+        else:
+            bd_filter = set(bd_list_entries)
+            _use_exact_filter = False
 
     if config_preproc["filename"] is None:
         filesToFormat = [config_preproc['filename_gold'],
@@ -180,31 +240,32 @@ def preprocessing(
                             and not c.startswith("B.")]
 
             if bd_filter is not None:
-                def _bd_matches(col: str) -> bool:
-                    # Exact match (BD_LIST contains literal raw or post-rename name)
-                    if col in bd_filter:
-                        return True
-                    stripped = sub(r":\d+$", "", col)   # strip Dexter numeric suffix
-                    if stripped in bd_filter:
-                        return True
-                    # Flexible match: BD_LIST uses "BD_CONDNAME" but column is
-                    # "BD_MEDI:SOURCE_CONDNAME:N" (e.g. "BD_MEDI:CPRD_ACTINIC_KERATOSIS:168").
-                    # Extract the body after "BD_MEDI:" then check whether any BD_LIST
-                    # entry's condition name (stripped of "BD_" prefix) is a suffix of it.
-                    col_body = sub(r"^BD_MEDI:", "", stripped)  # e.g. "CPRD_ACTINIC_KERATOSIS"
-                    for entry in bd_filter:
-                        cond = entry[3:] if entry.startswith("BD_") else entry
-                        # Normalize underscores: Aurum columns drop underscores from
-                        # condition names (ACTINICKERATOSIS vs ACTINIC_KERATOSIS).
-                        if cond and col_body.replace("_", "").endswith(cond.replace("_", "")):
+                if _use_exact_filter:
+                    # Mapping file was used: match exactly after stripping ':N' suffix
+                    _bd_cols_to_read = [
+                        c for c in _bd_cols_raw
+                        if sub(r":\d+$", "", c) in bd_filter
+                    ]
+                else:
+                    # No mapping file: BD_LIST entries are direct column names.
+                    # Try exact then fuzzy (legacy backward-compat path).
+                    def _bd_matches(col: str) -> bool:
+                        if col in bd_filter:
                             return True
-                    return False
-
-                _bd_cols_to_read = [c for c in _bd_cols_raw if _bd_matches(c)]
+                        stripped = sub(r":\d+$", "", col)
+                        if stripped in bd_filter:
+                            return True
+                        col_body = sub(r"^BD_MEDI:", "", stripped)
+                        for entry in bd_filter:
+                            cond = entry[3:] if entry.startswith("BD_") else entry
+                            if cond and col_body.replace("_", "").endswith(
+                                cond.replace("_", "")
+                            ):
+                                return True
+                        return False
+                    _bd_cols_to_read = [c for c in _bd_cols_raw if _bd_matches(c)]
 
                 if not _bd_cols_to_read:
-                    # Naming convention mismatch — include all BD_ columns rather
-                    # than silently producing a parquet with no condition columns.
                     logger.warning(
                         "BD_LIST filter matched 0 BD_ columns; "
                         "including all BD_ columns. Check that BD_LIST names "
@@ -310,6 +371,22 @@ def preprocessing(
         flag_temp_file = True
     else:
         outFile = config_preproc["filename"]
+
+    ###CoalesceSourceBDCols########################################################
+    # Coalesce source-prefixed BD_MEDI: columns into one column per condition.
+    # When a condition_map_file was supplied, output_names maps each condition's
+    # normalised key to its Paper Short Name, which becomes the column name in the
+    # processed parquet.  Without a mapping file the existing canonical_name logic
+    # derives a BD_CONDNAME from the Gold column name.
+    print("Coalescing BD source columns")
+    logger.info("Coalescing BD_ source columns")
+    _coalesced_path = f"{dir_data}dat_coalesced.parquet"
+    coalesce_bd_source_cols(f"{dir_data}{outFile}", _coalesced_path, logger, output_names=output_names)
+    if flag_temp_file:
+        os.remove(f"{dir_data}{outFile}")
+    flag_temp_file = True
+    outFile = "dat_coalesced.parquet"
+    _checkpoint("Coalescing BD_ source columns complete", logger)
 
     ###LinkHes#####################################################################
     if config_preproc["path_hes"] is not None:

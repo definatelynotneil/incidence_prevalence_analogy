@@ -4,7 +4,6 @@ from os.path import isdir, exists
 from shutil import copy
 from re import match, compile
 import polars as pl
-from distutils.dir_util import copy_tree
 from pandas import read_excel as pd_read_excel
 
 def getCrudeMap(filePath,) -> pl.DataFrame:

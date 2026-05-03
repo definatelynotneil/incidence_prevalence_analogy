@@ -66,8 +66,7 @@ class IncPrev():
         'STUDY_END_DATE', 'STUDY_START_DATE', \
         'BASELINE_DATE_LIST', 'DEMOGRAPHY', 'FILENAME', 'raw_data', \
         "date_fmt", "verbose", "DataKeys", "StudyDesignKeys", \
-        "increment_years", "increment_months", "increment_days", \
-        "BASELINE_DATE_LIST"
+        "increment_years", "increment_months", "increment_days"
 
     def __init__(self,
                  STUDY_END_DATE: datetime,
@@ -203,22 +202,25 @@ class IncPrev():
 
         Date columns are parsed and demographic nulls are filled on each chunk so
         that the rule expressions can be applied directly.
+
+        Preprocessing coalesces source-prefixed BD_MEDI: columns into clean
+        BD_CONDNAME columns, so cols contains the exact parquet column names.
         """
         import pyarrow.parquet as pq
 
         date_cols = [
             self.DataKeys["INDEX_DATE_COL"],
             self.DataKeys["END_DATE_COL"],
-        ]
-        bd_in_file = [c for c in self.BASELINE_DATE_LIST if c in cols]
-        date_cols = date_cols + bd_in_file
+        ] + list(self.BASELINE_DATE_LIST)
 
         catg_cols = self._flat_demo_cols()
 
         pf = pq.ParquetFile(self.FILENAME)
-        for batch in pf.iter_batches(columns=cols, batch_size=chunk_size):
+        pf_schema_names = set(pf.schema_arrow.names)
+        read_cols = [c for c in cols if c in pf_schema_names]
+
+        for batch in pf.iter_batches(columns=read_cols, batch_size=chunk_size):
             chunk = pl.from_arrow(batch)
-            # Ensure date columns are strings before strptime
             chunk = chunk.with_columns(
                 pl.col([c for c in date_cols if c in chunk.columns]).cast(pl.Utf8)
             )

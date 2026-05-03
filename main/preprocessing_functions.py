@@ -392,7 +392,7 @@ def mergeCols(
                        f"{path_dat}{outFile}",)
                 remove(f"{path_dat}condMerged_newCol.parquet")
 
-                q1 = scan_parquet(f"{path_dat}condMerged.parquet")#, infer_schema_length=0)
+                q1 = scan_parquet(f"{path_dat}{outFile}")
             else:
                 del dict_merge[out_col] #prevents deleting of unmerged cols
                 gc.collect()
@@ -576,6 +576,116 @@ def derive_columns(in_path: str, out_path: str, derived_config: dict) -> None:
         )
 
     lf.sink_parquet(out_path)
+
+
+def coalesce_bd_source_cols(
+    in_path: str,
+    out_path: str,
+    logger=None,
+    output_names: dict | None = None,
+) -> None:
+    """Coalesce source-prefixed BD_MEDI: columns into one column per condition.
+
+    After Gold/Aurum linking, condition columns carry source-specific prefixes:
+      BD_MEDI:CPRD_ACTINIC_KERATOSIS    (Gold, underscores in name)
+      BD_MEDI:CPRDAURUM_ACTINICKERATOSIS (Aurum, no underscores)
+      BD_MEDI:ACTINIC_KERATOSIS          (bare, no source sub-prefix)
+
+    Each patient has a non-null value in at most one source's column.  This
+    function groups these variants by normalised condition name (underscores
+    removed, uppercase), coalesces each group via pyarrow.compute.coalesce(),
+    and names the result according to output_names when provided (Paper Short
+    Name from the condition mapping file), or falls back to deriving a
+    BD_CONDNAME from the Gold column name.
+
+    output_names maps normalised condition key → desired output column name.
+    The normalised key for a Gold fragment 'CPRD_FOO_BAR' is 'FOOBAR'
+    (strip CPRD_/CPRDAURUM_ prefix, remove underscores, uppercase).
+
+    Uses PyArrow iter_batches so memory usage is bounded by batch size
+    regardless of how many conditions the parquet contains.  Polars
+    pl.coalesce() inside sink_parquet falls back to a full collect for wide
+    query plans and can OOM on datasets with many conditions.
+
+    Non-BD_MEDI: columns are passed through unchanged.
+    """
+    import re
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pyarrow.compute as pc
+
+    pf = pq.ParquetFile(in_path)
+    schema = pf.schema_arrow
+
+    source_bd = [c for c in schema.names if c.startswith("BD_MEDI:")]
+    non_source = [c for c in schema.names if not c.startswith("BD_MEDI:")]
+
+    if not source_bd:
+        if logger:
+            logger.info("coalesce_bd_source_cols: no BD_MEDI: columns found, skipping")
+        if in_path != out_path:
+            import shutil
+            shutil.copy2(in_path, out_path)
+        return
+
+    def norm_key(col: str) -> str:
+        body = re.sub(r"^BD_MEDI:CPRDAURUM_", "", col)
+        body = re.sub(r"^BD_MEDI:CPRD_", "", body)
+        body = re.sub(r"^BD_MEDI:", "", body)
+        return body.replace("_", "").upper()
+
+    def canonical_name(group_cols: list) -> str:
+        """Prefer CPRD (Gold) name — it has underscores matching BD_LIST entries."""
+        for c in group_cols:
+            if c.startswith("BD_MEDI:CPRD_") and not c.startswith("BD_MEDI:CPRDAURUM_"):
+                return "BD_" + c[len("BD_MEDI:CPRD_"):]
+        for c in group_cols:
+            if c.startswith("BD_MEDI:") and not c.startswith("BD_MEDI:CPRD"):
+                return "BD_" + c[len("BD_MEDI:"):]
+        for c in group_cols:
+            if c.startswith("BD_MEDI:CPRDAURUM_"):
+                return "BD_" + c[len("BD_MEDI:CPRDAURUM_"):]
+        return group_cols[0]
+
+    # Group source BD_ columns by normalised condition name
+    groups: dict = {}
+    for col in source_bd:
+        groups.setdefault(norm_key(col), []).append(col)
+
+    # Determine output column name for each group.
+    # output_names (from condition mapping) takes priority; fall back to canonical_name.
+    group_output_names: dict = {}
+    for key, cols in groups.items():
+        if output_names and key in output_names:
+            group_output_names[key] = output_names[key]
+        else:
+            group_output_names[key] = canonical_name(cols)
+
+    # Build the output schema: non-source columns first, then one per group
+    out_fields = [schema.field(c) for c in non_source]
+    for key in groups:
+        out_fields.append(pa.field(group_output_names[key], pa.string()))
+    out_schema = pa.schema(out_fields)
+
+    n_merged = sum(1 for cols in groups.values() if len(cols) > 1)
+
+    with pq.ParquetWriter(out_path, out_schema) as writer:
+        for batch in pf.iter_batches():
+            # Pass through non-source columns unchanged
+            arrays = [batch.column(c) for c in non_source]
+            # Coalesce each group into one array
+            for key, cols in groups.items():
+                if len(cols) > 1:
+                    arrays.append(pc.coalesce(*[batch.column(c) for c in cols]))
+                else:
+                    arrays.append(batch.column(cols[0]))
+            writer.write_batch(pa.record_batch(arrays, schema=out_schema))
+
+    if logger:
+        logger.info(
+            f"coalesce_bd_source_cols: {n_merged} cross-source pairs merged, "
+            f"{len(source_bd)} BD_MEDI: → {len(groups)} clean BD_ columns"
+        )
 
 
 def create_batch_parquet_files(
