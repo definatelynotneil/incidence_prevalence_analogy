@@ -1,3 +1,5 @@
+import gc
+import logging
 from typing import Optional, Union
 from datetime import date, datetime
 from typing import List, Dict, Callable, Iterator
@@ -7,6 +9,20 @@ from scipy.stats import chi2
 from scipy.special import ndtri
 from dateutil.relativedelta import relativedelta
 import polars as pl
+
+_log = logging.getLogger(__name__)
+
+
+def _rss_mb() -> str:
+    """Return current process RSS in MB as a formatted string."""
+    try:
+        with open("/proc/self/status") as _fh:
+            for _line in _fh:
+                if _line.startswith("VmRSS:"):
+                    return f"{int(_line.split()[1]) / 1024:.0f} MB"
+    except Exception:
+        pass
+    return "?"
 
 class IncPrev():
     """
@@ -412,36 +428,72 @@ class IncPrev():
                     streaming_chunk_size: Optional[int] = None,
                     ) -> tuple[pl.DataFrame, pl.DataFrame]:
         streaming = streaming_chunk_size is not None
+        n_conds = len(self.BASELINE_DATE_LIST)
+        n_demos = len(self.DEMOGRAPHY)
+        _log.info(
+            "runAnalysis: %d condition(s), %d demography group(s), streaming=%s "
+            "chunk_size=%s [RSS: %s]",
+            n_conds, n_demos, streaming, streaming_chunk_size, _rss_mb(),
+        )
 
         if streaming:
-            results_inc = self.calculate_overall_inc_prev_streaming(True, streaming_chunk_size) if inc else None
-            results_prev = self.calculate_overall_inc_prev_streaming(False, streaming_chunk_size) if prev else None
-            if len(self.DEMOGRAPHY) > 0:
+            if inc:
+                _log.info("runAnalysis: overall incidence (streaming) [RSS: %s]", _rss_mb())
+                results_inc = self.calculate_overall_inc_prev_streaming(True, streaming_chunk_size)
+            else:
+                results_inc = None
+            if prev:
+                _log.info("runAnalysis: overall prevalence (streaming) [RSS: %s]", _rss_mb())
+                results_prev = self.calculate_overall_inc_prev_streaming(False, streaming_chunk_size)
+            else:
+                results_prev = None
+            if n_demos > 0:
                 if inc:
+                    _log.info("runAnalysis: grouped incidence (streaming) [RSS: %s]", _rss_mb())
                     results_inc = pl.concat(
                         [results_inc, self.calculate_grouped_inc_prev_streaming(True, streaming_chunk_size)],
                         how="vertical",
                     )
                 if prev:
+                    _log.info("runAnalysis: grouped prevalence (streaming) [RSS: %s]", _rss_mb())
                     results_prev = pl.concat(
                         [results_prev, self.calculate_grouped_inc_prev_streaming(False, streaming_chunk_size)],
                         how="vertical",
                     )
         else:
-            results_inc = self.calculate_overall_inc_prev(is_incidence=True) if inc else None
-            results_prev = self.calculate_overall_inc_prev(is_incidence=False) if prev else None
-            if len(self.DEMOGRAPHY) > 0:
+            if inc:
+                _log.info("runAnalysis: overall incidence [RSS: %s]", _rss_mb())
+                results_inc = self.calculate_overall_inc_prev(is_incidence=True)
+                gc.collect()
+                _log.info("runAnalysis: overall incidence done [RSS: %s]", _rss_mb())
+            else:
+                results_inc = None
+            if prev:
+                _log.info("runAnalysis: overall prevalence [RSS: %s]", _rss_mb())
+                results_prev = self.calculate_overall_inc_prev(is_incidence=False)
+                gc.collect()
+                _log.info("runAnalysis: overall prevalence done [RSS: %s]", _rss_mb())
+            else:
+                results_prev = None
+            if n_demos > 0:
                 if inc:
+                    _log.info("runAnalysis: grouped incidence [RSS: %s]", _rss_mb())
                     results_inc = pl.concat(
                         [results_inc, self.calculate_grouped_inc_prev(is_incidence=True)],
                         how="vertical",
                     )
+                    gc.collect()
+                    _log.info("runAnalysis: grouped incidence done [RSS: %s]", _rss_mb())
                 if prev:
+                    _log.info("runAnalysis: grouped prevalence [RSS: %s]", _rss_mb())
                     results_prev = pl.concat(
                         [results_prev, self.calculate_grouped_inc_prev(is_incidence=False)],
                         how="vertical",
                     )
+                    gc.collect()
+                    _log.info("runAnalysis: grouped prevalence done [RSS: %s]", _rss_mb())
 
+        _log.info("runAnalysis: complete [RSS: %s]", _rss_mb())
         return tuple([results_inc, results_prev])
 
 
@@ -682,69 +734,72 @@ class IncPrev():
         if self.verbose:
             print(col_list)
 
-        all_num_results = []
-        all_den_results = []
+        col_name = "Incidence" if is_incidence else "Prevalence"
         rename_num = {"variable": "Date", "value": "Numerator"}
         rename_den = {"variable": "Date", "value": "Denominator"}
+        all_results: List[pl.DataFrame] = []
 
         for datecol_name in self.BASELINE_DATE_LIST:
-            # Filter the data
+            _log.debug(
+                "overall %s: condition %s [RSS: %s]",
+                col_name, datecol_name, _rss_mb(),
+            )
             filtered_data = self.filter_data_for_combination(self.raw_data,
                                                              [datecol_name],
                                                              [])
 
-            # Calculate numerator and denominator
             if is_incidence:
                 df_num = self.calculate_metrics(
-                    filtered_data,
-                    self.incidence_numerator_rule,
-                    drange,
-                    col_list[:-1],
-                    rename_num,
+                    filtered_data, self.incidence_numerator_rule,
+                    drange, col_list[:-1], rename_num,
                 )
                 df_den = self.calculate_metrics(
-                    filtered_data,
-                    self.incidence_denominator_rule,
-                    drange,
-                    col_list[:-1],
-                    rename_den,
+                    filtered_data, self.incidence_denominator_rule,
+                    drange, col_list[:-1], rename_den,
                 )
             else:
                 df_num = self.calculate_metrics(
-                    filtered_data,
-                    self.prevalence_numerator_rule,
-                    drange,
-                    col_list,
-                    rename_num,
+                    filtered_data, self.prevalence_numerator_rule,
+                    drange, col_list, rename_num,
                 )
                 df_den = self.calculate_metrics(
-                    filtered_data,
-                    self.prevalence_denominator_rule,
-                    drange,
-                    col_list,
-                    rename_den,
+                    filtered_data, self.prevalence_denominator_rule,
+                    drange, col_list, rename_den,
                 )
 
-            # Store results
-            all_num_results.append(df_num)
-            all_den_results.append(df_den)
-        # Combine all results
-        final_num_df = pl.concat(all_num_results, how="vertical").collect()
-        final_den_df = pl.concat(all_den_results, how="vertical").collect()
+            # Collect each condition immediately so Polars can free the
+            # intermediate wide (n_rows × n_dates) materialisations rather
+            # than accumulating all lazy scan plans and collecting at once.
+            num_coll = df_num.collect()
+            den_coll = df_den.collect()
+            del df_num, df_den
 
-        df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
-        col_name = "Incidence" if is_incidence else "Prevalence"
-        df_overall = df_overall.with_columns(
-            ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
-            pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
-            .alias("Lower_CI"),
-            pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
-            .alias("Upper_CI"),
-        )
+            partial = num_coll.join(den_coll, on=["Condition", "Group", "Subgroup", "Date"])
+            del num_coll, den_coll
 
-        return df_overall
+            partial = partial.with_columns(
+                ((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY).alias(col_name),
+                pl.struct(["Numerator", "Denominator"])
+                .map_elements(
+                    lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                    return_dtype=pl.Float64,
+                )
+                .alias("Lower_CI"),
+                pl.struct(["Numerator", "Denominator"])
+                .map_elements(
+                    lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                    return_dtype=pl.Float64,
+                )
+                .alias("Upper_CI"),
+            )
+            all_results.append(partial)
+            del partial
+            _log.debug(
+                "overall %s: condition %s done [RSS: %s]",
+                col_name, datecol_name, _rss_mb(),
+            )
+
+        return pl.concat(all_results, how="vertical")
 
 
     def calculate_grouped_inc_prev(
@@ -783,77 +838,83 @@ class IncPrev():
         if self.verbose:
             print(col_list)
 
-        all_num_results = []
-        all_den_results = []
+        col_name = "Incidence" if is_incidence else "Prevalence"
         rename_num = {"variable": "Date", "value": "Numerator"}
         rename_den = {"variable": "Date", "value": "Denominator"}
+        all_results: List[pl.DataFrame] = []
 
         for datecol_name in self.BASELINE_DATE_LIST:
             for demo in self.DEMOGRAPHY:
                 if isinstance(demo, list):
                     demo_ = ", ".join(demo)
                     data_ = self.raw_data.with_columns(
-                            pl.concat_str(pl.col(demo),
-                                          separator=", ").alias(demo_)
-                            )
+                        pl.concat_str(pl.col(demo), separator=", ").alias(demo_)
+                    )
                     filtered_data = self.filter_data_for_combination(data_,
                                                                      [datecol_name],
                                                                      [demo_])
-                else:# Filter the data
+                else:
                     filtered_data = self.filter_data_for_combination(self.raw_data,
                                                                      [datecol_name],
                                                                      [demo])
-                # Calculate numerator and denominator
+
+                demo_label = ", ".join(demo) if isinstance(demo, list) else demo
+                _log.debug(
+                    "grouped %s: condition %s demo %s [RSS: %s]",
+                    col_name, datecol_name, demo_label, _rss_mb(),
+                )
+
                 if is_incidence:
                     df_num = self.calculate_metrics(
-                        filtered_data,
-                        self.incidence_numerator_rule,
-                        drange,
-                        col_list[:-1],
-                        rename_num,
+                        filtered_data, self.incidence_numerator_rule,
+                        drange, col_list[:-1], rename_num,
                     )
                     df_den = self.calculate_metrics(
-                        filtered_data,
-                        self.incidence_denominator_rule,
-                        drange,
-                        col_list[:-1],
-                        rename_den,
+                        filtered_data, self.incidence_denominator_rule,
+                        drange, col_list[:-1], rename_den,
                     )
                 else:
                     df_num = self.calculate_metrics(
-                        filtered_data,
-                        self.prevalence_numerator_rule,
-                        drange,
-                        col_list,
-                        rename_num,
+                        filtered_data, self.prevalence_numerator_rule,
+                        drange, col_list, rename_num,
                     )
                     df_den = self.calculate_metrics(
-                        filtered_data,
-                        self.prevalence_denominator_rule,
-                        drange,
-                        col_list,
-                        rename_den,
+                        filtered_data, self.prevalence_denominator_rule,
+                        drange, col_list, rename_den,
                     )
-                # Store results
-                all_num_results.append(df_num)
-                all_den_results.append(df_den)
-        # Combine all results
-        final_num_df = pl.concat(all_num_results, how="vertical").collect()
-        final_den_df = pl.concat(all_den_results, how="vertical").collect()
 
-        df_overall = final_num_df.join(final_den_df, on=["Condition", "Group", "Subgroup", "Date"])
-        col_name = "Incidence" if is_incidence else "Prevalence"
-        df_overall = df_overall.with_columns(
-            ((pl.col("Numerator") / pl.col("Denominator"))*self.PER_PY).alias(col_name),
-            pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_lower(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
-            .alias("Lower_CI"),
-            pl.struct(["Numerator", "Denominator"])
-            .map_elements(lambda x: self.byars_higher(x["Numerator"], x["Denominator"])*self.PER_PY, return_dtype=pl.Float64,)
-            .alias("Upper_CI"),
-        )
+                # Collect each condition × demo immediately to free intermediate
+                # wide materialisations rather than deferring all to one big collect.
+                num_coll = df_num.collect()
+                den_coll = df_den.collect()
+                del df_num, df_den
 
-        return df_overall
+                partial = num_coll.join(den_coll, on=["Condition", "Group", "Subgroup", "Date"])
+                del num_coll, den_coll
+
+                partial = partial.with_columns(
+                    ((pl.col("Numerator") / pl.col("Denominator")) * self.PER_PY).alias(col_name),
+                    pl.struct(["Numerator", "Denominator"])
+                    .map_elements(
+                        lambda x: self.byars_lower(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                        return_dtype=pl.Float64,
+                    )
+                    .alias("Lower_CI"),
+                    pl.struct(["Numerator", "Denominator"])
+                    .map_elements(
+                        lambda x: self.byars_higher(x["Numerator"], x["Denominator"]) * self.PER_PY,
+                        return_dtype=pl.Float64,
+                    )
+                    .alias("Upper_CI"),
+                )
+                all_results.append(partial)
+                del partial
+                _log.debug(
+                    "grouped %s: condition %s demo %s done [RSS: %s]",
+                    col_name, datecol_name, demo_label, _rss_mb(),
+                )
+
+        return pl.concat(all_results, how="vertical")
 
 
 

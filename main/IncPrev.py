@@ -1,3 +1,5 @@
+import gc
+import logging
 import os
 import datetime
 import csv
@@ -8,6 +10,20 @@ from typing import Optional
 import pyarrow.dataset as ds
 import polars as pl
 from main.ANALOGY_SCIENTIFIC.IncPrevMethods_polars import IncPrev
+
+_log = logging.getLogger(__name__)
+
+
+def _rss_mb() -> str:
+    """Return current process RSS in MB as a formatted string."""
+    try:
+        with open("/proc/self/status") as _fh:
+            for _line in _fh:
+                if _line.startswith("VmRSS:"):
+                    return f"{int(_line.split()[1]) / 1024:.0f} MB"
+    except Exception:
+        pass
+    return "?"
 
 
 def _resolve_bd_list(bd_list: list, filename: str) -> list:
@@ -98,12 +114,23 @@ def processBatch(
     )
 
     # Incidence
+    _log.info("batch %s: starting incidence for %d condition(s) [RSS: %s]",
+              batchId, len(batch), _rss_mb())
     dat_inc = IncPrev(STUDY_END_DATE[0], STUDY_START_DATE[0], FILENAME, **common_kwargs)
     results_inc = dat_inc.runAnalysis(inc=True, prev=False, streaming_chunk_size=streaming_chunk_size)[0]
+    # Explicitly free the IncPrev object (lazy scan + raw_data) before prevalence
+    del dat_inc
+    gc.collect()
+    _log.info("batch %s: incidence done [RSS: %s]", batchId, _rss_mb())
 
     # Prevalence
+    _log.info("batch %s: starting prevalence for %d condition(s) [RSS: %s]",
+              batchId, len(batch), _rss_mb())
     dat_prev = IncPrev(STUDY_END_DATE[1], STUDY_START_DATE[1], FILENAME, **common_kwargs)
     results_prev = dat_prev.runAnalysis(inc=False, prev=True, streaming_chunk_size=streaming_chunk_size)[1]
+    del dat_prev
+    gc.collect()
+    _log.info("batch %s: prevalence done [RSS: %s]", batchId, _rss_mb())
 
     for result_ in (results_inc, results_prev):
         metric = "prev" if "Prevalence" in result_.columns else "inc"
@@ -118,6 +145,8 @@ def run_incprev(conf_incprev: dict,
     FULL_FILENAME = f"{dir_data}{conf_incprev['filename']}"
     streaming_chunk_size: Optional[int] = conf_incprev.get("streaming_chunk_size")
     create_batch_files: bool = conf_incprev.get("create_batch_files", False)
+    _log.info("run_incprev start [RSS: %s] streaming_chunk_size=%s create_batch_files=%s",
+              _rss_mb(), streaming_chunk_size, create_batch_files)
 
     STUDY_START_DATE_INC = datetime.datetime(
         year=conf_incprev["start_date"]["inc"]["year"],
@@ -194,6 +223,10 @@ def run_incprev(conf_incprev: dict,
     ]
 
     N_PROCESSES = conf_incprev.get("n_processes") or 1
+    _log.info(
+        "run_incprev: %d condition(s) in %d batch(es), batch_size=%d, n_processes=%d",
+        len(BASELINE_DATE_LIST), len(batched_bd), batch_size, N_PROCESSES,
+    )
     if N_PROCESSES == 1:
         for batch_ in batches:
             processBatch(*batch_)
