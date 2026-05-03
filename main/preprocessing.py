@@ -197,7 +197,8 @@ def preprocessing(
             bd_filter = set(bd_list_entries)
             _use_exact_filter = False
 
-    if config_preproc["filename"] is None:
+    if config_preproc["filename"] in (None, "null", ""):
+        config_preproc["filename"] = None
         filesToFormat = [config_preproc['filename_gold'],
                          config_preproc['filename_aurum'],]
         if config_preproc["filename_gold"][-3:] == "csv":
@@ -347,7 +348,7 @@ def preprocessing(
     logger.info("    Formatting null values finished")
 
     ###LinkingAurumGold############################################################
-    if config_preproc["filename"] is None:
+    if config_preproc["filename"] in (None, "null", ""):
         print("Linking")
         logger.info("Linking Gold and Aurum")
 
