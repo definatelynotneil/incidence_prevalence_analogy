@@ -69,7 +69,7 @@ def report_results(
                                     pl.col("Condition")==cond_,
                                     pl.col("Group")==group_,
                                     ).with_columns(
-                                        pl.col("Date").str.strptime(pl.Date, "%Y-%m-%d"),
+                                        pl.col("Date").str.to_date(format="%Y-%m-%d"),
                                         pl.col(y_var_).cast(pl.Float64),
                                         pl.col("Lower_CI").cast(pl.Float64),
                                         pl.col("Upper_CI").cast(pl.Float64),

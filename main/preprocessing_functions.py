@@ -346,7 +346,7 @@ def mergeCols(
                 q1_schema = q1.collect_schema()
                 for v_ in merge_cols:
                     if q1_schema[v_] == plUtf8:
-                        q1 = q1.with_columns(col(v_).str.strptime(plDate, date_fmt))
+                        q1 = q1.with_columns(col(v_).str.to_date(format=date_fmt))
 
                 q1 = (
                     q1
@@ -407,7 +407,7 @@ def mergeCols(
                 q1_schema = q1.collect_schema()
                 for v_ in merge_cols:
                     if q1_schema[v_] == plUtf8:
-                        q1 = q1.with_columns(col(v_).str.strptime(plDate, date_fmt))
+                        q1 = q1.with_columns(col(v_).str.to_date(format=date_fmt))
 
                 q1 = (
                     q1
