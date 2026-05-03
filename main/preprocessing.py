@@ -363,12 +363,12 @@ def preprocessing(
             B_ind=2,
             map_file=f"{dir_data}{config_preproc['map_file_AtoB']}",
             map_delim=config_preproc['map_delim_AtoB'],
-            low_memory=False,
+            low_memory=True,
             wdir=dir_data,
             logger=logger,
             outFile=outFile,
             )
-        logger.info("    Linking finished")
+        _checkpoint("Linking Gold and Aurum complete", logger)
         flag_temp_file = True
     else:
         outFile = config_preproc["filename"]
